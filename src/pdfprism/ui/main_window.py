@@ -3,20 +3,26 @@
 import logging
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
+    QDockWidget,
     QFileDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
     QToolBar,
+    QWidget,
 )
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.exceptions import PdfPrismError
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
+from pdfprism.ui.page_cache import PageCache
+from pdfprism.ui.widgets.outline_panel import OutlinePanel
 from pdfprism.ui.widgets.page_view import PageView
+from pdfprism.ui.widgets.thumbnail_panel import ThumbnailPanel
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +33,32 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("pdfprism")
-        self.resize(1100, 1100)
+        self.resize(1300, 1100)
 
         self._adapter = PyMuPDFAdapter()
-        self._page_view = PageView(self)
+
+        # Shared cache: PageView and ThumbnailPanel both render through it.
+        self._page_cache = PageCache()
+
+        self._page_view = PageView(self._page_cache, self)
         self.setCentralWidget(self._page_view)
 
+        # Sidebars
+        self._thumbnail_panel = ThumbnailPanel(self._page_cache, self)
+        self._outline_panel = OutlinePanel(self)
+        self._thumbnail_dock = self._make_dock("Thumbnails", self._thumbnail_panel)
+        self._outline_dock = self._make_dock("Outline", self._outline_panel)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._thumbnail_dock)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._outline_dock)
+        self.tabifyDockWidget(self._thumbnail_dock, self._outline_dock)
+        self._thumbnail_dock.raise_()
+
+        # Signal wiring
         self._page_view.page_changed.connect(self._on_page_changed)
         self._page_view.zoom_changed.connect(self._on_zoom_changed)
+        self._page_view.page_changed.connect(self._thumbnail_panel.set_current_page)
+        self._thumbnail_panel.page_selected.connect(self._page_view.go_to_page)
+        self._outline_panel.page_selected.connect(self._page_view.go_to_page)
 
         # Status bar widgets
         self._page_indicator = QLabel("")
@@ -47,6 +71,17 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._update_status_bar()
         self._update_actions_enabled()
+
+    @staticmethod
+    def _make_dock(title: str, widget: QWidget) -> QDockWidget:
+        dock = QDockWidget(title)
+        dock.setWidget(widget)
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        return dock
 
     # ----- actions, menus, toolbar -----
 
@@ -106,6 +141,15 @@ class MainWindow(QMainWindow):
         self.act_zoom_out.setShortcut("Ctrl+-")
         self.act_zoom_out.triggered.connect(self._page_view.zoom_out)
 
+        # Dock toggles (Qt provides these for free)
+        self.act_toggle_thumbnails = self._thumbnail_dock.toggleViewAction()
+        self.act_toggle_thumbnails.setText("&Thumbnails")
+        self.act_toggle_thumbnails.setShortcut("F4")
+
+        self.act_toggle_outline = self._outline_dock.toggleViewAction()
+        self.act_toggle_outline.setText("&Outline")
+        self.act_toggle_outline.setShortcut("F5")
+
     def _build_menus(self) -> None:
         menubar = self.menuBar()
 
@@ -122,6 +166,9 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.act_zoom_in)
         view_menu.addAction(self.act_zoom_out)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_toggle_thumbnails)
+        view_menu.addAction(self.act_toggle_outline)
 
         go_menu = menubar.addMenu("&Go")
         go_menu.addAction(self.act_first_page)
@@ -164,11 +211,15 @@ class MainWindow(QMainWindow):
             return
 
         self._page_view.set_adapter(self._adapter)
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._outline_panel.set_outline(self._adapter.get_outline())
         self.setWindowTitle(f"pdfprism - {Path(path_str).name}")
         self._update_actions_enabled()
 
     def _on_close_document(self) -> None:
         self._page_view.clear()
+        self._thumbnail_panel.set_adapter(None)
+        self._outline_panel.set_outline([])
         self._adapter.close()
         self.setWindowTitle("pdfprism")
         self._update_status_bar()

@@ -1,14 +1,18 @@
 """PageView widget: single-page PDF view with zoom and navigation."""
 
 from enum import StrEnum
-from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPainter, QPixmap, QResizeEvent, QWheelEvent
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
+from PySide6.QtGui import QPainter, QResizeEvent, QWheelEvent
+from PySide6.QtWidgets import (
+    QGraphicsPixmapItem,
+    QGraphicsScene,
+    QGraphicsView,
+    QWidget,
+)
 
-if TYPE_CHECKING:
-    from pdfprism.core.document import DocumentAdapter
+from pdfprism.core.document import DocumentAdapter
+from pdfprism.ui.page_cache import PageCache
 
 
 class ZoomMode(StrEnum):
@@ -20,8 +24,8 @@ class ZoomMode(StrEnum):
     CUSTOM = "custom"
 
 
-# Oversample factor passed to the adapter when rendering. Higher values
-# give better quality at zoom > 100% at the cost of memory and render time.
+# Oversample factor passed to the cache when rendering. Higher values give
+# better quality at zoom > 100% at the cost of memory and render time.
 _RENDER_SCALE = 2.0
 
 # Min / max custom zoom (Acrobat-style; 1.0 = 100%).
@@ -36,9 +40,10 @@ _ZOOM_STEP_OUT = 0.8
 class PageView(QGraphicsView):
     """Zoomable, pannable view of one PDF page at a time.
 
-    Holds a ``DocumentAdapter`` plus view state (current page index, zoom
-    mode, custom zoom ratio) and renders on demand. No caching in PR 2;
-    the LRU cache for adjacent pages lands in PR 3 alongside thumbnails.
+    Renders through a shared ``PageCache`` so that adjacent thumbnails or
+    repeat visits don't re-hit the adapter. State held: page count, current
+    page index, zoom mode, custom zoom ratio. The adapter itself lives in
+    the cache; this widget never holds it directly.
 
     Signals:
         page_changed(int): emitted when the displayed page index changes
@@ -50,13 +55,18 @@ class PageView(QGraphicsView):
     page_changed = Signal(int)
     zoom_changed = Signal(float)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        page_cache: PageCache,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
         self._pixmap_item: QGraphicsPixmapItem | None = None
 
-        self._adapter: DocumentAdapter | None = None
+        self._page_cache = page_cache
+        self._page_count: int = 0
         self._current_page: int = 0
         self._zoom_mode: ZoomMode = ZoomMode.FIT_PAGE
         self._custom_zoom: float = 1.0
@@ -70,25 +80,31 @@ class PageView(QGraphicsView):
 
     # ----- document binding -----
 
-    def set_adapter(self, adapter: "DocumentAdapter") -> None:
-        """Bind to an open document and render its first page."""
-        self._adapter = adapter
+    def set_adapter(self, adapter: DocumentAdapter | None) -> None:
+        """Bind to a document via the shared cache and render page 1.
+
+        The cache's existing entries are cleared because they belonged to a
+        previous document. Pass ``None`` to unbind.
+        """
+        self._page_cache.set_adapter(adapter)
+        self._page_count = adapter.page_count if adapter is not None else 0
         self._current_page = 0
-        self._render_current_page()
-        self.page_changed.emit(self._current_page)
+        if self._page_count > 0:
+            self._render_current_page()
+            self.page_changed.emit(self._current_page)
 
     def clear(self) -> None:
-        """Clear the view; no document is bound after this."""
+        """Clear the view's local state. Leaves the shared cache alone."""
         self._scene.clear()
         self._pixmap_item = None
-        self._adapter = None
+        self._page_count = 0
         self._current_page = 0
 
     # ----- read-only state -----
 
     @property
     def page_count(self) -> int:
-        return self._adapter.page_count if self._adapter else 0
+        return self._page_count
 
     @property
     def current_page(self) -> int:
@@ -107,9 +123,9 @@ class PageView(QGraphicsView):
 
     def go_to_page(self, index: int) -> None:
         """Jump to page ``index`` (0-based). No-op if out of range or unchanged."""
-        if self._adapter is None:
+        if self._page_count == 0:
             return
-        if not (0 <= index < self._adapter.page_count):
+        if not (0 <= index < self._page_count):
             return
         if index == self._current_page:
             return
@@ -118,12 +134,12 @@ class PageView(QGraphicsView):
         self.page_changed.emit(self._current_page)
 
     def next_page(self) -> None:
-        if self._adapter is None:
+        if self._page_count == 0:
             return
         self.go_to_page(self._current_page + 1)
 
     def prev_page(self) -> None:
-        if self._adapter is None:
+        if self._page_count == 0:
             return
         self.go_to_page(self._current_page - 1)
 
@@ -131,9 +147,9 @@ class PageView(QGraphicsView):
         self.go_to_page(0)
 
     def last_page(self) -> None:
-        if self._adapter is None:
+        if self._page_count == 0:
             return
-        self.go_to_page(self._adapter.page_count - 1)
+        self.go_to_page(self._page_count - 1)
 
     # ----- zoom -----
 
@@ -165,11 +181,9 @@ class PageView(QGraphicsView):
     # ----- rendering -----
 
     def _render_current_page(self) -> None:
-        if self._adapter is None:
+        if self._page_count == 0:
             return
-        png_bytes = self._adapter.render_page(self._current_page, zoom=_RENDER_SCALE)
-        pixmap = QPixmap()
-        pixmap.loadFromData(png_bytes, "PNG")
+        pixmap = self._page_cache.get_or_render(self._current_page, zoom=_RENDER_SCALE)
         self._scene.clear()
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
