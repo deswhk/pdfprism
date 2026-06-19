@@ -77,9 +77,9 @@ src/pdfprism/
 │   ├── optimize.py              # PR 13: compress, linearize
 │   └── combine.py               # PR 14: PDFs + images + .txt
 ├── ui/                          # Qt widgets and windows
-│   ├── main_window.py           # PR 1 minimum; expands per PR
-│   ├── widgets/                 # PR 3+: page_view, thumbnail_panel, etc.
-│   └── dialogs/                 # PR 9+: password, merge, ocr, etc.
+│   ├── main_window.py           # File/View/Go menus, toolbar, status bar
+│   ├── widgets/                 # page_view; thumbnails (PR 3+), outline (PR 3+)
+│   └── dialogs/                 # goto_page; password (PR 10+), merge (PR 9+)
 ├── config.py                    # App constants (name, org, etc.)
 ├── logging_config.py            # Stdlib logging setup
 └── app.py                       # Entry point
@@ -102,6 +102,40 @@ The protocol uses `@runtime_checkable` so it can be verified at runtime with
 equivalent test suite. Adapters are stateful: a single instance holds at most
 one open document. Opening a second document on the same instance closes the
 first.
+
+## The PageView Widget
+
+`pdfprism.ui.widgets.page_view.PageView` is the central viewing surface for
+a single PDF page. It subclasses `QGraphicsView` and holds:
+
+- The bound `DocumentAdapter`
+- Current page index (0-based)
+- Current zoom mode (`FIT_PAGE`, `FIT_WIDTH`, `ACTUAL_SIZE`, or `CUSTOM`)
+- Custom zoom ratio (Acrobat-style; 1.0 = 100%)
+
+**Rendering strategy.** Each page is rendered by the adapter once at a fixed
+oversample factor (`_RENDER_SCALE = 2.0`, i.e. `zoom=2.0` passed to
+`render_page`) and displayed via `QGraphicsView`'s transform for the actual
+visible zoom. This avoids a full re-render on every zoom step. At extreme
+zoom (above ~200%) the displayed pixels are interpolated; a future PR can
+re-render at higher DPI past a threshold if quality becomes an issue.
+
+**Effective zoom math.** "Acrobat-style" zoom (1.0 = page rendered at 72
+DPI on screen) maps to `self.transform().m11() * _RENDER_SCALE`. The widget
+emits `zoom_changed(float)` with this value; the main window's status bar
+displays it as a percentage.
+
+**No LRU cache yet.** PR 2 renders on demand only. The pixmap cache for
+adjacent pages lands in PR 3 alongside thumbnails, which share the same
+rendered output.
+
+**Signals.**
+
+- `page_changed(int)` — emitted when the displayed page index changes
+- `zoom_changed(float)` — emitted when the effective zoom changes
+
+Other UI elements (status bar, menu/toolbar action-enabled state) subscribe
+to these signals rather than polling.
 
 ## Error Handling
 
@@ -143,12 +177,12 @@ becomes the logger name.
 - **Adapter contract tests.** `tests/core/test_pymupdf_adapter.py` covers
   Protocol conformance, every method, and edge cases (missing file, garbage
   file, out-of-range pages, idempotent close).
+- **UI widget tests** use `pytest-qt`'s `qtbot` fixture: instantiate the
+  widget, drive its public API, assert state and emitted signals. See
+  `tests/ui/test_page_view.py`. No full event-loop driving unless necessary.
 - **pytest fixtures for composition.** `conftest.py` provides
-  `sample_pdf_path`, `garbage_file`, `missing_pdf_path`; the test file layers
-  `adapter` and `opened_adapter` on top.
-- **UI tests** (later PRs) will use `pytest-qt` for smoke tests: instantiate
-  widgets, trigger signals, verify state — no full event-loop driving unless
-  necessary.
+  `sample_pdf_path`, `garbage_file`, `missing_pdf_path`; per-test files layer
+  `adapter`, `opened_adapter`, `page_view`, and `adapter_with_doc` on top.
 
 ## Roadmap
 
@@ -160,7 +194,10 @@ merges via PR review and CI on green.
 - **PR 1: Foundation.** Scaffold, license, CI, branch protection (via
   pre-commit hook), `DocumentAdapter` Protocol, `PyMuPDFAdapter`, minimal Qt
   window that opens a PDF and renders page 1.
-- PR 2: Navigation, zoom, single-page view.
+- **PR 2: Navigation and zoom.** `PageView` widget (`QGraphicsView`-based);
+  page navigation (prev / next / first / last / go-to); four zoom modes
+  (fit page, fit width, actual size, custom %); View / Go menus, toolbar,
+  status bar, full keyboard shortcut surface.
 - PR 3: Thumbnails sidebar, outline (TOC) sidebar.
 - PR 4: In-document text search.
 - PR 5: Continuous / two-up view modes, full-screen, dark mode, recent files.
@@ -234,11 +271,15 @@ If you are new to the codebase, read in this order:
 4. `src/pdfprism/core/document.py` — the engine seam (read the docstrings).
 5. `src/pdfprism/core/adapters/pymupdf_adapter.py` — the only file that
    knows what PyMuPDF looks like.
-6. `src/pdfprism/ui/main_window.py` — the current UI surface (minimal in
-   PR 1).
-7. `src/pdfprism/app.py` — entry point and how everything wires together.
-8. `tests/core/test_pymupdf_adapter.py` — the contract, expressed as
+6. `src/pdfprism/ui/widgets/page_view.py` — the view-state model (page,
+   zoom, signals) and rendering strategy.
+7. `src/pdfprism/ui/main_window.py` — menus, toolbar, status bar wired to
+   `PageView`.
+8. `src/pdfprism/app.py` — entry point and how everything wires together.
+9. `tests/core/test_pymupdf_adapter.py` — the adapter contract, as
    assertions.
+10. `tests/ui/test_page_view.py` — the widget's API and signals, as
+    assertions.
 
 When adding a new feature, work bottom-up: extend the Protocol if needed,
 implement in the adapter, add or extend a service, then wire it into the UI.
