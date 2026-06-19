@@ -42,6 +42,16 @@ def main() -> None:
         }
     )
 
+    # Bookmarks (table of contents). Each entry: [level, title, page_number_1based]
+    doc.set_toc(
+        [
+            [1, "Chapter 1: Introduction", 1],
+            [2, "1.1 Overview", 1],
+            [2, "1.2 Background", 2],
+            [1, "Chapter 2: Conclusion", 3],
+        ]
+    )
+
     doc.save(str(output), garbage=4, deflate=True, clean=True)
     doc.close()
 

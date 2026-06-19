@@ -11,7 +11,7 @@ from pdfprism.core.exceptions import (
     DocumentOpenError,
     PageOutOfRangeError,
 )
-from pdfprism.core.types import DocumentInfo, PageInfo
+from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo
 
 # PNG file signature
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -115,3 +115,23 @@ class TestClose:
     def test_close_is_idempotent(self, opened_adapter: PyMuPDFAdapter) -> None:
         opened_adapter.close()
         opened_adapter.close()
+
+
+class TestGetOutline:
+    def test_returns_outline_items(self, opened_adapter: PyMuPDFAdapter) -> None:
+        outline = opened_adapter.get_outline()
+        assert len(outline) == 4
+        assert all(isinstance(item, OutlineItem) for item in outline)
+
+    def test_first_chapter(self, opened_adapter: PyMuPDFAdapter) -> None:
+        outline = opened_adapter.get_outline()
+        assert outline[0] == OutlineItem(level=1, title="Chapter 1: Introduction", page_index=0)
+
+    def test_subsection_entries(self, opened_adapter: PyMuPDFAdapter) -> None:
+        outline = opened_adapter.get_outline()
+        assert outline[1] == OutlineItem(level=2, title="1.1 Overview", page_index=0)
+        assert outline[2] == OutlineItem(level=2, title="1.2 Background", page_index=1)
+
+    def test_second_chapter(self, opened_adapter: PyMuPDFAdapter) -> None:
+        outline = opened_adapter.get_outline()
+        assert outline[3] == OutlineItem(level=1, title="Chapter 2: Conclusion", page_index=2)

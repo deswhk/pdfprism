@@ -10,7 +10,7 @@ from pdfprism.core.exceptions import (
     PageOutOfRangeError,
     PasswordRequiredError,
 )
-from pdfprism.core.types import DocumentInfo, PageInfo
+from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,19 @@ class PyMuPDFAdapter:
         matrix = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=matrix, alpha=False)
         return pix.tobytes("png")
+
+    def get_outline(self) -> list[OutlineItem]:
+        self._require_open()
+        assert self._doc is not None
+        toc = self._doc.get_toc()
+        return [
+            OutlineItem(
+                level=int(entry[0]),
+                title=str(entry[1]),
+                page_index=max(0, int(entry[2]) - 1),
+            )
+            for entry in toc
+        ]
 
     def _require_open(self) -> None:
         if self._doc is None:

@@ -30,3 +30,18 @@ class DocumentInfo:
     producer: str | None
     is_encrypted: bool
     needs_password: bool
+
+
+@dataclass(frozen=True)
+class OutlineItem:
+    """A single entry in a PDF document outline (table of contents).
+
+    The outline is returned as a flat list with hierarchy expressed through
+    ``level``: ``level=1`` is a top-level chapter, ``level=2`` is a child
+    of the most recent level-1 entry, and so on. This shape matches PyMuPDF's
+    ``Document.get_toc()`` and is what the ``OutlinePanel`` model expects.
+    """
+
+    level: int
+    title: str
+    page_index: int

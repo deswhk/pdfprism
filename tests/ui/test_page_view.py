@@ -6,12 +6,14 @@ from pathlib import Path
 import pytest
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
+from pdfprism.ui.page_cache import PageCache
 from pdfprism.ui.widgets.page_view import PageView, ZoomMode
 
 
 @pytest.fixture
 def page_view(qtbot) -> PageView:
-    widget = PageView()
+    cache = PageCache()
+    widget = PageView(cache)
     widget.resize(800, 600)
     qtbot.addWidget(widget)
     return widget

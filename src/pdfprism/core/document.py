@@ -9,7 +9,7 @@ the adapter package.
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from pdfprism.core.types import DocumentInfo, PageInfo
+from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo
 
 
 @runtime_checkable
@@ -58,5 +58,13 @@ class DocumentAdapter(Protocol):
 
         Raises:
             PageOutOfRangeError: if ``index`` is outside the document range.
+        """
+        ...
+
+    def get_outline(self) -> list[OutlineItem]:
+        """Return the document outline (table of contents) as a flat list.
+
+        Returns an empty list if the document has no outline. The list is
+        in document order; hierarchy is expressed via each item's ``level``.
         """
         ...
