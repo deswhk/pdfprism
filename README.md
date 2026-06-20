@@ -8,15 +8,19 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 Under active development. Milestone 1 (Reader Core) is the current focus; see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full 15-PR roadmap.
 
-**What works today (through PR 4):**
+**What works today (through PR 5):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
+- Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
 - Page navigation: prev/next/first/last, go-to-page dialog, full keyboard shortcut surface
 - Thumbnail sidebar and outline (TOC) sidebar — dockable, tabified on the left, toggle via the View menu
-- In-document text search (case-insensitive substring) with yellow/orange highlight overlays and Acrobat-style wrap
+- In-document text search (case-insensitive substring) with yellow/orange highlight overlays and Acrobat-style wrap; highlights span every visible page in continuous mode and scroll the current hit into view
+- Full-screen mode (F11) that hides menubar, toolbars, status bar, and docks while keeping all shortcuts live
+- Manual dark mode toggle, persisted across sessions
+- File → Open Recent submenu (last 10 documents) and a remembered last-used Open directory
 - Project-relative logging when running from source; OS-standard app-data location when packaged
 
-**Coming next (Milestone 1):** continuous and two-up view modes, full-screen, dark mode, recent files, multi-document tabs, and search across multiple PDFs.
+**Coming next (Milestone 1):** multi-document tabs and search across multiple PDFs.
 
 ## Scope
 
@@ -59,7 +63,7 @@ uv run pytest
 uv run pdfprism
 ```
 
-Then `File > Open` (Ctrl+O) to choose a PDF. Use the menus, toolbar, sidebars, and keyboard shortcuts to navigate, zoom, and search.
+Then `File > Open` (Ctrl+O) to choose a PDF, or pick one from `File > Open Recent`. Use the menus, toolbar, sidebars, and keyboard shortcuts to navigate, zoom, switch view modes, search, and toggle dark mode or full-screen.
 
 ### Keyboard shortcuts
 
@@ -76,6 +80,8 @@ Then `File > Open` (Ctrl+O) to choose a PDF. Use the menus, toolbar, sidebars, a
 | First page | Ctrl+Home |
 | Last page | Ctrl+End |
 | Go to page | Ctrl+G |
+| Single-page view | Ctrl+3 |
+| Continuous view | Ctrl+4 |
 | Fit page | Ctrl+0 |
 | Fit width | Ctrl+1 |
 | Actual size (100%) | Ctrl+2 |
@@ -83,6 +89,8 @@ Then `File > Open` (Ctrl+O) to choose a PDF. Use the menus, toolbar, sidebars, a
 | Zoom out | Ctrl+- |
 | Toggle thumbnails sidebar | F4 |
 | Toggle outline sidebar | F5 |
+| Toggle full-screen | F11 |
+| Exit full-screen | Esc |
 | Ctrl + mouse wheel | Zoom |
 | Click and drag | Pan |
 

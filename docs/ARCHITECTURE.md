@@ -52,6 +52,12 @@ by `scripts/generate_sample_pdf.py`.
 configured once at startup in `pdfprism.logging_config.configure()`. Each
 module gets its own logger via `logger = logging.getLogger(__name__)`.
 
+**User-facing state persists via `QSettings`.** View preferences (dark mode),
+recent files, and the last-used Open directory are stored under the
+`pdfprism` organization / application keys via `QSettings`. The platform
+decides the backend (registry on Windows, plist on macOS, INI on Linux);
+the code only cares about the key names.
+
 **AGPL-3.0 because of PyMuPDF.** This is a non-negotiable downstream of the
 engine choice. If the project ever needs a more permissive license, the
 engine swap (see above) is the first step.
@@ -78,14 +84,15 @@ src/pdfprism/
 │   └── combine.py               # PR 14: PDFs + images + .txt
 ├── ui/                          # Qt widgets and windows
 │   ├── main_window.py           # Menus, toolbar, search toolbar, status bar, docks
+│   ├── theme.py                 # PR 5: DARK_QSS stylesheet
 │   ├── page_cache.py            # Thread-safe LRU pixmap cache (shared)
 │   ├── widgets/
-│   │   ├── page_view.py         # QGraphicsView page surface + highlight overlay
+│   │   ├── page_view.py         # QGraphicsView page surface + view modes + highlight overlay
 │   │   ├── search_bar.py        # Find input + Prev/Next + counter
 │   │   ├── thumbnail_panel.py   # QListView thumbnail strip
 │   │   └── outline_panel.py     # QTreeView outline (TOC)
 │   └── dialogs/                 # goto_page; password (PR 10+), merge (PR 9+)
-├── config.py                    # App constants (name, org, etc.)
+├── config.py                    # App constants (name, org, MAX_RECENT_FILES, etc.)
 ├── logging_config.py            # Stdlib logging setup
 └── app.py                       # Entry point
 ```
@@ -122,12 +129,13 @@ the same coordinate system as `render_page`'s output.
 ## The PageView Widget
 
 `pdfprism.ui.widgets.page_view.PageView` is the central viewing surface for
-a single PDF page. It subclasses `QGraphicsView` and holds:
+PDF pages. It subclasses `QGraphicsView` and holds:
 
 - The shared `PageCache`
 - Page count, current page index (0-based)
 - Current zoom mode (`FIT_PAGE`, `FIT_WIDTH`, `ACTUAL_SIZE`, or `CUSTOM`)
 - Custom zoom ratio (Acrobat-style; 1.0 = 100%)
+- Current view mode (`SINGLE_PAGE` or `CONTINUOUS`) — see "View Modes" below
 - Search state: list of `SearchHit`s and a pointer to the "current" one
 
 It does **not** hold the adapter directly — the cache does. `set_adapter`
@@ -150,6 +158,45 @@ displays it as a percentage.
 
 - `page_changed(int)` — emitted when the displayed page index changes
 - `zoom_changed(float)` — emitted when the effective zoom changes
+- `view_mode_changed(ViewMode)` — emitted when the layout switches between
+  single-page and continuous
+
+## View Modes
+
+`PageView` supports two layouts, controlled by the `ViewMode` enum
+(`SINGLE_PAGE`, `CONTINUOUS`) and selected via `View → Single Page` (Ctrl+3)
+or `View → Continuous` (Ctrl+4). The two actions live in a `QActionGroup`
+with `setExclusive(True)` so the menu always shows exactly one checked.
+
+**Single-page mode** shows exactly one `QGraphicsPixmapItem` at the scene
+origin. Navigation replaces the item with the requested page; zoom is the
+view's transform on that single item. This is the default and the lightest
+weight option.
+
+**Continuous mode** lays out every page as its own `QGraphicsPixmapItem`
+stacked vertically with a fixed gutter. Per-page rect Y offsets are
+precomputed when the layout is built and used by `_on_scroll` to update
+`current_page` as the user scrolls past page boundaries (the topmost
+visible page wins). Navigation via `go_to_page` scrolls to the
+corresponding page rect rather than swapping items. Highlights are drawn
+on top of every visible page that has hits, so search overlays span the
+document instead of being clipped to a single page; the
+`_ensure_hit_visible` helper additionally scrolls the current hit into
+the viewport in continuous mode, so F3 across pages always lands the
+match somewhere the user can see.
+
+A `view_mode_changed(ViewMode)` signal fires whenever the mode actually
+changes (no-op `set_view_mode` calls are filtered). MainWindow listens
+on this signal to keep the View menu's `QActionGroup` checkmark in sync
+even if the mode is set programmatically — closing the loop between
+the menu and the underlying state.
+
+**Known limitation.** Continuous mode renders all pages eagerly when the
+mode is entered or the document is bound. This is fine for the test
+fixture (3 pages) and modest documents; very large documents (hundreds
+of pages) will pay the full render cost upfront. Lazy on-scroll
+rendering, and a two-up "facing pages" layout, are tracked as PR 5.5
+candidates.
 
 ## PageCache
 
@@ -253,7 +300,10 @@ each as a translucent `QGraphicsRectItem` on the scene at z-value 1
 one `set_current_hit` points to. Because the highlights are scene
 overlays rather than baked into the pixmap, the `PageCache` is never
 invalidated by search, and the existing zoom transform scales highlights
-along with the page.
+along with the page. In continuous mode the same machinery draws
+overlays on every visible page that has hits, and `_ensure_hit_visible`
+scrolls the current hit into the viewport so F3 across pages always
+lands somewhere visible.
 
 **Signal wiring (MainWindow).**
 
@@ -278,6 +328,76 @@ project the resulting `Quad` objects through the page's rotation
 transform. Tracked as a PR 4.5 candidate alongside case-sensitive and
 whole-word matching, since all three need above-adapter manipulation of
 PyMuPDF text data.
+
+## Theme
+
+`pdfprism.ui.theme.DARK_QSS` is a Qt Style Sheet (QSS) string applied
+app-wide when dark mode is enabled. It covers `QMainWindow`, `QMenuBar`,
+`QMenu`, `QToolBar`, `QToolButton`, `QStatusBar`, `QDockWidget`,
+`QListView`, `QTreeView`, `QLineEdit`, `QPushButton`, `QScrollBar`, and
+`QTabBar` — the surfaces the user actually sees. Backgrounds are
+`#2b2b2b` / `#353535` / `#1e1e1e`, foreground is `#e0e0e0`, accent is
+`#0078d4`.
+
+`View → Dark Mode` is a checkable `QAction` whose state is persisted
+under the QSettings key `view/dark_mode` and restored at startup. Toggling
+it calls `QApplication.setStyleSheet(DARK_QSS)` to apply, or `""` to
+revert to the platform default. The PDF page itself is rendered by
+PyMuPDF and is unaffected by the stylesheet — only the chrome around it.
+
+Light mode is the platform default style; there is intentionally no
+custom light stylesheet, so the app respects platform conventions when
+dark mode is off.
+
+## Full Screen
+
+`View → Full Screen` (F11) is a checkable `QAction` that toggles a
+distraction-free presentation: menubar, both toolbars, status bar, and
+both docks are hidden, and the window is switched to `showFullScreen`.
+Before hiding, the previous visibility of each chrome element is snapped
+into `_fullscreen_state`; toggling off (F11 again, or `Esc` via
+`keyPressEvent`) restores each element to exactly the state the user had
+before. There is no separate "presentation mode" — it is just full
+screen with everything hidden.
+
+All actions that have shortcuts are registered on `MainWindow` itself via
+`addAction(...)` after construction. This is required because Qt only
+delivers shortcut events through actions that live on a visible widget,
+and the menubar is hidden in full-screen. Without registering on the
+window, F11 / Ctrl+F / arrow keys etc. would stop working as soon as the
+chrome disappeared.
+
+## Recent Files and Last Directory
+
+`File → Open Recent` is a submenu populated from QSettings key
+`recent/files` (newline-joined list of paths, most recent first, capped
+at `MAX_RECENT_FILES = 10` from `pdfprism.config`). Each entry's
+`triggered` lambda calls `_open_path(p)` with the captured path, so
+opening from history goes through the same code as a fresh open. A
+`Clear Recent` action at the bottom of the submenu wipes the list.
+Entries whose underlying file no longer exists are filtered out at
+render time but kept in storage (the user can `Clear Recent` to prune
+them).
+
+`File → Open...` remembers the last successfully chosen directory via
+QSettings key `recent/last_dir` and seeds the file dialog with it on
+the next invocation. The Open dialog and Open Recent submenu are the
+only two ways a user can pick a file path in the app today.
+
+**`_on_open` vs `_open_path`.** The dialog flow (`_on_open`) is separated
+from the work flow (`_open_path`) so the recent-files menu can invoke
+the latter directly without round-tripping through the file picker.
+`_open_path` canonicalizes the path with `Path.resolve(strict=False)`
+(catching `OSError` and falling back to the original) so two different
+spellings of the same file collapse to one recent-files entry.
+
+**Failed-open recovery.** If `_open_path` catches `PdfPrismError`, it
+calls `_reset_to_empty_state()` to clear all UI surfaces (page view,
+sidebars, status bar, window title, action enablement) before showing
+the error dialog. The adapter itself has already closed any
+previously-open document by the time the exception is raised. The same
+`_reset_to_empty_state` is shared by `File → Close`, which then also
+calls `self._adapter.close()`.
 
 ## Error Handling
 
@@ -365,7 +485,19 @@ merges via PR review and CI on green.
   doesn't invalidate the cache. Case-insensitive substring only; case-
   sensitive, whole-word, regex, and rotated-page rect alignment deferred
   to PR 4.5.
-- PR 5: Continuous / two-up view modes, full-screen, dark mode, recent files.
+- **PR 5: View modes, full-screen, dark mode, recent files.** `ViewMode`
+  enum and a continuous-scroll layout in `PageView` (two-up "facing
+  pages" deferred to PR 5.5); `view_mode_changed` signal closes the loop
+  with the View menu's exclusive `QActionGroup`. F11 full-screen with
+  state save / restore for menubar, toolbars, status bar, and docks; all
+  shortcuts registered on `MainWindow` itself so they survive a hidden
+  menubar. Manual dark mode toggle via the new `ui/theme.py` module
+  (`DARK_QSS` app-wide stylesheet), persisted under QSettings
+  `view/dark_mode`. `File → Open Recent` submenu and last-directory
+  memory under QSettings `recent/files` and `recent/last_dir`; refactor
+  of `_on_open` (dialog) vs `_open_path` (work, with
+  `Path.resolve(strict=False)` canonicalization), plus a shared
+  `_reset_to_empty_state` so failed opens leave the UI clean.
 - PR 6: Multi-document tabs, search across multiple PDFs.
 
 ### Milestone 2 — Extraction
@@ -421,6 +553,8 @@ they are simply not on the v1 path.
   PyMuPDF if licensing intent ever shifts.
 - **Protocol** (Python). PEP 544 structural subtyping. Used here as the
   interface for `DocumentAdapter`.
+- **QSS.** Qt Style Sheet — Qt's CSS-like styling syntax. Used by the
+  dark-mode theme.
 - **Quad.** A general quadrilateral in PDF coordinates. PyMuPDF returns
   `Quad`s (rather than axis-aligned `Rect`s) when text is rotated, so the
   bounding region tracks the glyph orientation correctly.
@@ -444,21 +578,23 @@ If you are new to the codebase, read in this order:
    services will follow.
 7. `src/pdfprism/ui/page_cache.py` — the rendering choke point; everything
    that displays a page goes through here.
-8. `src/pdfprism/ui/widgets/page_view.py` — the central page surface
-   (zoom, navigation, signals, search highlights).
-9. `src/pdfprism/ui/widgets/thumbnail_panel.py` — `QListView` thumbnails
-   over the shared cache.
-10. `src/pdfprism/ui/widgets/outline_panel.py` — `QTreeView` outline, with
+8. `src/pdfprism/ui/theme.py` — the dark-mode QSS stylesheet; small but
+   referenced by `main_window.py`.
+9. `src/pdfprism/ui/widgets/page_view.py` — the central page surface
+   (zoom, navigation, view modes, signals, search highlights).
+10. `src/pdfprism/ui/widgets/thumbnail_panel.py` — `QListView` thumbnails
+    over the shared cache.
+11. `src/pdfprism/ui/widgets/outline_panel.py` — `QTreeView` outline, with
     the stack-based flat-to-tree conversion.
-11. `src/pdfprism/ui/widgets/search_bar.py` — find input, counter, signals.
-12. `src/pdfprism/ui/main_window.py` — menus, toolbar, status bar, the two
-    tabified left docks, the search toolbar, and the signal wiring that
-    ties everything together.
-13. `src/pdfprism/app.py` — entry point and how everything wires together.
-14. `tests/core/test_pymupdf_adapter.py` — the adapter contract, as
+12. `src/pdfprism/ui/widgets/search_bar.py` — find input, counter, signals.
+13. `src/pdfprism/ui/main_window.py` — menus, toolbars, status bar, the two
+    tabified left docks, the search toolbar, full-screen state, dark
+    theme apply, and the recent-files / last-directory plumbing.
+14. `src/pdfprism/app.py` — entry point and how everything wires together.
+15. `tests/core/test_pymupdf_adapter.py` — the adapter contract, as
     assertions.
-15. `tests/services/test_search.py` — service-level expectations.
-16. `tests/ui/test_page_cache.py`, `test_page_view.py`,
+16. `tests/services/test_search.py` — service-level expectations.
+17. `tests/ui/test_page_cache.py`, `test_page_view.py`,
     `test_thumbnail_panel.py`, `test_outline_panel.py`,
     `test_search_bar.py` — the UI surface, as assertions.
 
