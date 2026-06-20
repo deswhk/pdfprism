@@ -1,8 +1,8 @@
-"""PageView widget: single-page PDF view with zoom, navigation, search highlights."""
+"""PageView widget: PDF view with zoom, navigation, view modes, search highlights."""
 
 from enum import StrEnum
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -33,42 +33,51 @@ class ZoomMode(StrEnum):
     CUSTOM = "custom"
 
 
-# Oversample factor passed to the cache when rendering. Higher values give
-# better quality at zoom > 100% at the cost of memory and render time.
-_RENDER_SCALE = 2.0
+class ViewMode(StrEnum):
+    """How pages are laid out in the view."""
 
-# Min / max custom zoom (Acrobat-style; 1.0 = 100%).
+    SINGLE_PAGE = "single_page"
+    CONTINUOUS = "continuous"
+
+
+_RENDER_SCALE = 2.0
 _MIN_ZOOM = 0.1
 _MAX_ZOOM = 10.0
-
-# Step multipliers for zoom_in / zoom_out.
 _ZOOM_STEP_IN = 1.25
 _ZOOM_STEP_OUT = 0.8
 
-# Search-highlight colors. Semi-transparent so the underlying text stays
-# readable. Yellow for "all other matches on this page", orange for "the
-# one you're currently navigated to".
+# Vertical spacing between pages in continuous mode (in scene units == pixmap px).
+_PAGE_SPACING = 24.0
+
 _HIGHLIGHT_OTHER = QColor(255, 235, 59, 110)
 _HIGHLIGHT_CURRENT = QColor(255, 152, 0, 160)
 
 
 class PageView(QGraphicsView):
-    """Zoomable, pannable view of one PDF page at a time.
+    """Zoomable, pannable PDF view supporting single-page and continuous modes.
 
-    Renders through a shared ``PageCache``. Search highlights are drawn as
-    overlay rect items on the scene (not baked into the cached pixmap),
-    so they can be added, removed, and recolored without invalidating
-    the cache.
+    The scene contains one or more page pixmap items, positioned according
+    to the active view mode. In single-page mode the scene has exactly one
+    item (the current page). In continuous mode all pages are present,
+    stacked vertically with ``_PAGE_SPACING`` between them.
+
+    Current page semantics by mode:
+        - Single page: the page actually rendered to the scene.
+        - Continuous: the page whose top crosses the viewport top, derived
+          from scroll position via ``_on_scroll``.
+
+    Search highlights are scene overlays. Single-page shows only the current
+    page's hits; continuous shows all hits, each translated to its page's
+    scene offset.
 
     Signals:
-        page_changed(int): emitted when the displayed page index changes
-            (0-based).
-        zoom_changed(float): emitted when the effective zoom changes
-            (1.0 = 100%, Acrobat-style).
+        page_changed(int): current page index changed (0-based).
+        zoom_changed(float): effective zoom changed (1.0 = 100%, Acrobat).
     """
 
     page_changed = Signal(int)
     zoom_changed = Signal(float)
+    view_mode_changed = Signal(ViewMode)
 
     def __init__(
         self,
@@ -78,13 +87,16 @@ class PageView(QGraphicsView):
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
-        self._pixmap_item: QGraphicsPixmapItem | None = None
+        self._pixmap_items: list[QGraphicsPixmapItem] = []
+        self._page_offsets: list[float] = []
 
         self._page_cache = page_cache
         self._page_count: int = 0
         self._current_page: int = 0
+        self._view_mode: ViewMode = ViewMode.SINGLE_PAGE
         self._zoom_mode: ZoomMode = ZoomMode.FIT_PAGE
         self._custom_zoom: float = 1.0
+        self._building_layout: bool = False
 
         self._search_hits: list[SearchHit] = []
         self._current_hit: SearchHit | None = None
@@ -93,32 +105,28 @@ class PageView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setBackgroundBrush(Qt.GlobalColor.darkGray)
+
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
     # ----- document binding -----
 
     def set_adapter(self, adapter: DocumentAdapter | None) -> None:
-        """Bind to a document via the shared cache and render page 1.
-
-        The cache's existing entries are cleared because they belonged to a
-        previous document. Search state is also cleared. Pass ``None`` to
-        unbind.
-        """
         self._page_cache.set_adapter(adapter)
         self._page_count = adapter.page_count if adapter is not None else 0
         self._current_page = 0
         self._search_hits = []
         self._current_hit = None
         if self._page_count > 0:
-            self._render_current_page()
+            self._build_layout()
             self.page_changed.emit(self._current_page)
 
     def clear(self) -> None:
-        """Clear the view's local state. Leaves the shared cache alone."""
         self._scene.clear()
-        self._pixmap_item = None
+        self._pixmap_items = []
+        self._page_offsets = []
         self._highlight_items = []
         self._page_count = 0
         self._current_page = 0
@@ -136,18 +144,32 @@ class PageView(QGraphicsView):
         return self._current_page
 
     @property
+    def view_mode(self) -> ViewMode:
+        return self._view_mode
+
+    @property
     def zoom_mode(self) -> ZoomMode:
         return self._zoom_mode
 
     @property
     def effective_zoom(self) -> float:
-        """Current effective zoom in Acrobat terms (1.0 = 100% = actual size)."""
         return self.transform().m11() * _RENDER_SCALE
+
+    # ----- view mode -----
+
+    def set_view_mode(self, mode: ViewMode) -> None:
+        """Switch view mode, preserving current page and search state."""
+        if mode == self._view_mode:
+            return
+        self._view_mode = mode
+        if self._page_count > 0:
+            self._build_layout()
+            self._scroll_to_current_page()
+        self.view_mode_changed.emit(mode)
 
     # ----- navigation -----
 
     def go_to_page(self, index: int) -> None:
-        """Jump to page ``index`` (0-based). No-op if out of range or unchanged."""
         if self._page_count == 0:
             return
         if not (0 <= index < self._page_count):
@@ -155,7 +177,11 @@ class PageView(QGraphicsView):
         if index == self._current_page:
             return
         self._current_page = index
-        self._render_current_page()
+        if self._view_mode == ViewMode.SINGLE_PAGE:
+            self._build_layout()
+        else:
+            self._scroll_to_current_page()
+            self._refresh_highlights()
         self.page_changed.emit(self._current_page)
 
     def next_page(self) -> None:
@@ -192,7 +218,6 @@ class PageView(QGraphicsView):
         self._apply_zoom_mode()
 
     def set_custom_zoom(self, ratio: float) -> None:
-        """Set a custom zoom level (1.0 = 100%)."""
         self._custom_zoom = max(_MIN_ZOOM, min(ratio, _MAX_ZOOM))
         self._zoom_mode = ZoomMode.CUSTOM
         self._apply_zoom_mode()
@@ -206,60 +231,134 @@ class PageView(QGraphicsView):
     # ----- search highlights -----
 
     def set_search_hits(self, hits: list[SearchHit]) -> None:
-        """Stash all search hits and redraw highlights for the current page.
-
-        Hits on other pages are kept in state and re-appear when the user
-        navigates to those pages.
-        """
         self._search_hits = list(hits)
         self._refresh_highlights()
 
     def set_current_hit(self, hit: SearchHit | None) -> None:
-        """Mark ``hit`` as the active match (orange) and navigate to its page.
-
-        If ``hit`` lives on a different page than the one currently shown,
-        the view navigates to that page first; the highlight refresh runs
-        as part of rendering.
-        """
         self._current_hit = hit
         if hit is not None and hit.page_index != self._current_page:
             self.go_to_page(hit.page_index)
         else:
             self._refresh_highlights()
+        if hit is not None:
+            self._ensure_hit_visible(hit)
 
     def clear_search(self) -> None:
-        """Remove all search state and highlights."""
         self._search_hits = []
         self._current_hit = None
         self._clear_highlight_items()
 
-    # ----- rendering -----
-
-    def _render_current_page(self) -> None:
-        if self._page_count == 0:
+    def _ensure_hit_visible(self, hit: SearchHit) -> None:
+        """Scroll the view so the given hit's rect is in the viewport."""
+        if not self._pixmap_items:
             return
+        if self._view_mode == ViewMode.CONTINUOUS:
+            if not (0 <= hit.page_index < len(self._page_offsets)):
+                return
+            y_offset = self._page_offsets[hit.page_index]
+        else:
+            if hit.page_index != self._current_page:
+                return
+            y_offset = 0.0
+        rect = QRectF(
+            hit.x0 * _RENDER_SCALE,
+            hit.y0 * _RENDER_SCALE + y_offset,
+            (hit.x1 - hit.x0) * _RENDER_SCALE,
+            (hit.y1 - hit.y0) * _RENDER_SCALE,
+        )
+        self.ensureVisible(rect, 50, 50)
+
+    # ----- layout (private) -----
+
+    def _build_layout(self) -> None:
+        """Rebuild the scene according to the current view mode."""
+        self._building_layout = True
+        try:
+            self._scene.clear()
+            self._pixmap_items = []
+            self._page_offsets = []
+            self._highlight_items = []
+
+            if self._page_count == 0:
+                return
+
+            if self._view_mode == ViewMode.SINGLE_PAGE:
+                self._build_single_page_layout()
+            else:
+                self._build_continuous_layout()
+
+            self._apply_zoom_mode()
+            self._refresh_highlights()
+        finally:
+            self._building_layout = False
+
+    def _build_single_page_layout(self) -> None:
         pixmap = self._page_cache.get_or_render(self._current_page, zoom=_RENDER_SCALE)
-        self._scene.clear()
-        self._highlight_items = []
-        self._pixmap_item = self._scene.addPixmap(pixmap)
-        self._scene.setSceneRect(self._pixmap_item.boundingRect())
-        self._apply_zoom_mode()
-        self._refresh_highlights()
+        item = self._scene.addPixmap(pixmap)
+        item.setPos(0, 0)
+        self._pixmap_items.append(item)
+        self._page_offsets.append(0.0)
+        self._scene.setSceneRect(item.boundingRect())
+
+    def _build_continuous_layout(self) -> None:
+        y = 0.0
+        max_w = 0.0
+        for i in range(self._page_count):
+            pixmap = self._page_cache.get_or_render(i, zoom=_RENDER_SCALE)
+            item = self._scene.addPixmap(pixmap)
+            item.setPos(0, y)
+            self._pixmap_items.append(item)
+            self._page_offsets.append(y)
+            y += float(pixmap.height()) + _PAGE_SPACING
+            max_w = max(max_w, float(pixmap.width()))
+        self._scene.setSceneRect(0, 0, max_w, y)
+
+    def _scroll_to_current_page(self) -> None:
+        if self._view_mode != ViewMode.CONTINUOUS:
+            return
+        if not (0 <= self._current_page < len(self._page_offsets)):
+            return
+        y_scene = self._page_offsets[self._current_page]
+        target = int(y_scene * self.transform().m22())
+        self.verticalScrollBar().setValue(target)
+
+    def _on_scroll(self, _value: int) -> None:
+        if self._building_layout:
+            return
+        if self._view_mode != ViewMode.CONTINUOUS:
+            return
+        if not self._page_offsets:
+            return
+        view_top = self.mapToScene(0, 0).y()
+        new_current = 0
+        for i, offset in enumerate(self._page_offsets):
+            if offset > view_top + 1.0:
+                break
+            new_current = i
+        if new_current != self._current_page:
+            self._current_page = new_current
+            self.page_changed.emit(new_current)
 
     def _refresh_highlights(self) -> None:
         self._clear_highlight_items()
-        if self._pixmap_item is None:
+        if not self._pixmap_items:
             return
         for hit in self._search_hits:
-            if hit.page_index != self._current_page:
-                continue
+            if self._view_mode == ViewMode.SINGLE_PAGE:
+                if hit.page_index != self._current_page:
+                    continue
+                y_offset = 0.0
+            else:
+                if not (0 <= hit.page_index < len(self._page_offsets)):
+                    continue
+                y_offset = self._page_offsets[hit.page_index]
             color = _HIGHLIGHT_CURRENT if hit == self._current_hit else _HIGHLIGHT_OTHER
-            self._add_highlight_rect(hit, color)
+            self._add_highlight_rect(hit, color, y_offset)
 
-    def _add_highlight_rect(self, hit: SearchHit, color: QColor) -> None:
+    def _add_highlight_rect(self, hit: SearchHit, color: QColor, y_offset: float) -> None:
         item = QGraphicsRectItem(
             hit.x0 * _RENDER_SCALE,
-            hit.y0 * _RENDER_SCALE,
+            hit.y0 * _RENDER_SCALE + y_offset,
             (hit.x1 - hit.x0) * _RENDER_SCALE,
             (hit.y1 - hit.y0) * _RENDER_SCALE,
         )
@@ -274,14 +373,24 @@ class PageView(QGraphicsView):
             self._scene.removeItem(item)
         self._highlight_items = []
 
+    def _current_pixmap_item(self) -> QGraphicsPixmapItem | None:
+        if not self._pixmap_items:
+            return None
+        if self._view_mode == ViewMode.SINGLE_PAGE:
+            return self._pixmap_items[0]
+        if 0 <= self._current_page < len(self._pixmap_items):
+            return self._pixmap_items[self._current_page]
+        return self._pixmap_items[0]
+
     def _apply_zoom_mode(self) -> None:
-        if self._pixmap_item is None:
+        item = self._current_pixmap_item()
+        if item is None:
             return
         if self._zoom_mode == ZoomMode.FIT_PAGE:
-            self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+            self.fitInView(item, Qt.AspectRatioMode.KeepAspectRatio)
         elif self._zoom_mode == ZoomMode.FIT_WIDTH:
             view_w = self.viewport().width()
-            item_w = self._pixmap_item.boundingRect().width()
+            item_w = item.boundingRect().width()
             self.resetTransform()
             if item_w > 0:
                 ratio = view_w / item_w

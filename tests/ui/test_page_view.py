@@ -4,12 +4,12 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QGraphicsRectItem
+from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsRectItem
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.types import SearchHit
 from pdfprism.ui.page_cache import PageCache
-from pdfprism.ui.widgets.page_view import PageView, ZoomMode
+from pdfprism.ui.widgets.page_view import PageView, ViewMode, ZoomMode
 
 
 @pytest.fixture
@@ -280,3 +280,68 @@ class TestHighlights:
         page_view.set_adapter(adapter_with_doc)  # rebind same adapter
         rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
         assert rects == []
+
+
+class TestViewMode:
+    def test_default_view_mode_is_single_page(self, page_view: PageView) -> None:
+        assert page_view.view_mode == ViewMode.SINGLE_PAGE
+
+    def test_single_page_mode_has_one_pixmap(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        items = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPixmapItem)]
+        assert len(items) == 1
+
+    def test_continuous_mode_renders_all_pages(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_view_mode(ViewMode.CONTINUOUS)
+        items = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPixmapItem)]
+        assert len(items) == 3
+
+    def test_switching_back_to_single_reduces_items(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_view_mode(ViewMode.CONTINUOUS)
+        page_view.set_view_mode(ViewMode.SINGLE_PAGE)
+        items = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPixmapItem)]
+        assert len(items) == 1
+
+    def test_mode_set_before_adapter_is_honored(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_view_mode(ViewMode.CONTINUOUS)
+        page_view.set_adapter(adapter_with_doc)
+        assert page_view.view_mode == ViewMode.CONTINUOUS
+        items = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPixmapItem)]
+        assert len(items) == 3
+
+    def test_continuous_highlights_show_across_pages(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_view_mode(ViewMode.CONTINUOUS)
+        hits = [
+            SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120),
+            SearchHit(page_index=1, x0=72, y0=100, x1=200, y1=120),
+            SearchHit(page_index=2, x0=72, y0=100, x1=200, y1=120),
+        ]
+        page_view.set_search_hits(hits)
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        assert len(rects) == 3
+
+    def test_set_same_mode_is_noop(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_view_mode(ViewMode.SINGLE_PAGE)
+        page_view.set_view_mode(ViewMode.SINGLE_PAGE)
+        assert page_view.view_mode == ViewMode.SINGLE_PAGE
+
+    def test_set_view_mode_emits_signal(self, page_view: PageView, qtbot) -> None:
+        with qtbot.waitSignal(page_view.view_mode_changed, timeout=1000) as blocker:
+            page_view.set_view_mode(ViewMode.CONTINUOUS)
+        assert blocker.args == [ViewMode.CONTINUOUS]
