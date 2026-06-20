@@ -18,10 +18,13 @@ from PySide6.QtWidgets import (
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.exceptions import PdfPrismError
+from pdfprism.core.types import SearchHit
+from pdfprism.services.search import SearchService
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
 from pdfprism.ui.page_cache import PageCache
 from pdfprism.ui.widgets.outline_panel import OutlinePanel
 from pdfprism.ui.widgets.page_view import PageView
+from pdfprism.ui.widgets.search_bar import SearchBar
 from pdfprism.ui.widgets.thumbnail_panel import ThumbnailPanel
 
 logger = logging.getLogger(__name__)
@@ -36,9 +39,13 @@ class MainWindow(QMainWindow):
         self.resize(1300, 1100)
 
         self._adapter = PyMuPDFAdapter()
-
-        # Shared cache: PageView and ThumbnailPanel both render through it.
         self._page_cache = PageCache()
+        self._search_service = SearchService(self._adapter)
+
+        # Search cursor state (MainWindow owns this; PageView and SearchBar
+        # are told what to display).
+        self._search_hits: list[SearchHit] = []
+        self._current_hit_index: int = -1
 
         self._page_view = PageView(self._page_cache, self)
         self.setCentralWidget(self._page_view)
@@ -53,12 +60,24 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self._thumbnail_dock, self._outline_dock)
         self._thumbnail_dock.raise_()
 
+        # Search bar in its own toolbar (hidden until Ctrl+F)
+        self._search_bar = SearchBar(self)
+        self._search_toolbar = QToolBar("Find", self)
+        self._search_toolbar.setMovable(False)
+        self._search_toolbar.addWidget(self._search_bar)
+        self._search_toolbar.setVisible(False)
+
         # Signal wiring
         self._page_view.page_changed.connect(self._on_page_changed)
         self._page_view.zoom_changed.connect(self._on_zoom_changed)
         self._page_view.page_changed.connect(self._thumbnail_panel.set_current_page)
         self._thumbnail_panel.page_selected.connect(self._page_view.go_to_page)
         self._outline_panel.page_selected.connect(self._page_view.go_to_page)
+
+        self._search_bar.find_requested.connect(self._on_find)
+        self._search_bar.next_requested.connect(self._on_find_next)
+        self._search_bar.prev_requested.connect(self._on_find_prev)
+        self._search_bar.closed.connect(self._on_close_search)
 
         # Status bar widgets
         self._page_indicator = QLabel("")
@@ -69,6 +88,10 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_menus()
         self._build_toolbar()
+        # Search toolbar goes below the main toolbar.
+        self.addToolBarBreak()
+        self.addToolBar(self._search_toolbar)
+
         self._update_status_bar()
         self._update_actions_enabled()
 
@@ -98,6 +121,19 @@ class MainWindow(QMainWindow):
         self.act_quit = QAction("&Quit", self)
         self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.act_quit.triggered.connect(self.close)
+
+        # Edit (Find)
+        self.act_find = QAction("&Find...", self)
+        self.act_find.setShortcut(QKeySequence.StandardKey.Find)
+        self.act_find.triggered.connect(self._on_open_search)
+
+        self.act_find_next = QAction("Find &Next", self)
+        self.act_find_next.setShortcut(QKeySequence.StandardKey.FindNext)
+        self.act_find_next.triggered.connect(self._on_find_next)
+
+        self.act_find_prev = QAction("Find &Previous", self)
+        self.act_find_prev.setShortcut(QKeySequence.StandardKey.FindPrevious)
+        self.act_find_prev.triggered.connect(self._on_find_prev)
 
         # Navigation
         self.act_first_page = QAction("&First Page", self)
@@ -141,7 +177,7 @@ class MainWindow(QMainWindow):
         self.act_zoom_out.setShortcut("Ctrl+-")
         self.act_zoom_out.triggered.connect(self._page_view.zoom_out)
 
-        # Dock toggles (Qt provides these for free)
+        # Dock toggles
         self.act_toggle_thumbnails = self._thumbnail_dock.toggleViewAction()
         self.act_toggle_thumbnails.setText("&Thumbnails")
         self.act_toggle_thumbnails.setShortcut("F4")
@@ -158,6 +194,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_close_doc)
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
+
+        edit_menu = menubar.addMenu("&Edit")
+        edit_menu.addAction(self.act_find)
+        edit_menu.addAction(self.act_find_next)
+        edit_menu.addAction(self.act_find_prev)
 
         view_menu = menubar.addMenu("&View")
         view_menu.addAction(self.act_fit_page)
@@ -195,7 +236,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.act_zoom_in)
         toolbar.addAction(self.act_zoom_out)
 
-    # ----- slots -----
+    # ----- file slots -----
 
     def _on_open(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
@@ -210,6 +251,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Open failed", str(exc))
             return
 
+        self._reset_search_state()
         self._page_view.set_adapter(self._adapter)
         self._thumbnail_panel.set_adapter(self._adapter)
         self._outline_panel.set_outline(self._adapter.get_outline())
@@ -217,6 +259,7 @@ class MainWindow(QMainWindow):
         self._update_actions_enabled()
 
     def _on_close_document(self) -> None:
+        self._reset_search_state()
         self._page_view.clear()
         self._thumbnail_panel.set_adapter(None)
         self._outline_panel.set_outline([])
@@ -224,6 +267,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("pdfprism")
         self._update_status_bar()
         self._update_actions_enabled()
+
+    # ----- navigation slot -----
 
     def _on_goto_page(self) -> None:
         page_count = self._page_view.page_count
@@ -233,6 +278,54 @@ class MainWindow(QMainWindow):
         dialog = GotoPageDialog(current_1based, page_count, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._page_view.go_to_page(dialog.page_number - 1)
+
+    # ----- search slots -----
+
+    def _on_open_search(self) -> None:
+        self._search_toolbar.setVisible(True)
+        self._search_bar.focus_input()
+
+    def _on_close_search(self) -> None:
+        self._reset_search_state()
+        self._search_toolbar.setVisible(False)
+
+    def _on_find(self, term: str) -> None:
+        if self._page_view.page_count == 0:
+            return
+        hits = self._search_service.find_all(term)
+        self._search_hits = hits
+        self._page_view.set_search_hits(hits)
+        if hits:
+            self._current_hit_index = 0
+            self._update_current_hit()
+        else:
+            self._current_hit_index = -1
+            self._search_bar.set_match_count(0, 0)
+
+    def _on_find_next(self) -> None:
+        if not self._search_hits:
+            return
+        self._current_hit_index = (self._current_hit_index + 1) % len(self._search_hits)
+        self._update_current_hit()
+
+    def _on_find_prev(self) -> None:
+        if not self._search_hits:
+            return
+        self._current_hit_index = (self._current_hit_index - 1) % len(self._search_hits)
+        self._update_current_hit()
+
+    def _update_current_hit(self) -> None:
+        hit = self._search_hits[self._current_hit_index]
+        self._page_view.set_current_hit(hit)
+        self._search_bar.set_match_count(self._current_hit_index + 1, len(self._search_hits))
+
+    def _reset_search_state(self) -> None:
+        self._search_hits = []
+        self._current_hit_index = -1
+        self._page_view.clear_search()
+        self._search_bar.clear()
+
+    # ----- view-state slots -----
 
     def _on_page_changed(self, index: int) -> None:
         self._update_status_bar()
@@ -266,6 +359,10 @@ class MainWindow(QMainWindow):
         self.act_actual_size.setEnabled(has_doc)
         self.act_zoom_in.setEnabled(has_doc)
         self.act_zoom_out.setEnabled(has_doc)
+
+        self.act_find.setEnabled(has_doc)
+        self.act_find_next.setEnabled(has_doc)
+        self.act_find_prev.setEnabled(has_doc)
 
         self.act_first_page.setEnabled(has_doc and current > 0)
         self.act_prev_page.setEnabled(has_doc and current > 0)

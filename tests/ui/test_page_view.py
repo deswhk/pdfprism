@@ -4,8 +4,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QGraphicsRectItem
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
+from pdfprism.core.types import SearchHit
 from pdfprism.ui.page_cache import PageCache
 from pdfprism.ui.widgets.page_view import PageView, ZoomMode
 
@@ -183,3 +185,98 @@ class TestSignals:
         page_view.set_adapter(adapter_with_doc)
         with qtbot.waitSignal(page_view.zoom_changed, timeout=1000):
             page_view.set_fit_width()
+
+
+class TestHighlights:
+    def test_no_highlights_initially(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        assert rects == []
+
+    def test_set_search_hits_draws_one_per_match(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        hits = [
+            SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120),
+            SearchHit(page_index=0, x0=72, y0=150, x1=200, y1=170),
+        ]
+        page_view.set_search_hits(hits)
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        assert len(rects) == 2
+
+    def test_only_current_page_hits_drawn(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        hits = [
+            SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120),
+            SearchHit(page_index=1, x0=72, y0=100, x1=200, y1=120),
+            SearchHit(page_index=2, x0=72, y0=100, x1=200, y1=120),
+        ]
+        page_view.set_search_hits(hits)
+        assert page_view.current_page == 0
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        assert len(rects) == 1
+
+    def test_navigation_redraws_for_new_page(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        hits = [
+            SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120),
+            SearchHit(page_index=1, x0=72, y0=100, x1=200, y1=120),
+            SearchHit(page_index=1, x0=72, y0=150, x1=200, y1=170),
+        ]
+        page_view.set_search_hits(hits)
+        page_view.go_to_page(1)
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        assert len(rects) == 2
+
+    def test_set_current_hit_navigates(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        hits = [SearchHit(page_index=2, x0=72, y0=100, x1=200, y1=120)]
+        page_view.set_search_hits(hits)
+        page_view.set_current_hit(hits[0])
+        assert page_view.current_page == 2
+
+    def test_current_hit_uses_different_color(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        hits = [
+            SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120),
+            SearchHit(page_index=0, x0=72, y0=150, x1=200, y1=170),
+        ]
+        page_view.set_search_hits(hits)
+        page_view.set_current_hit(hits[0])
+        rects = sorted(
+            [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)],
+            key=lambda r: r.rect().y(),
+        )
+        assert len(rects) == 2
+        assert rects[0].brush().color() != rects[1].brush().color()
+
+    def test_clear_search_removes_highlights(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        hits = [SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120)]
+        page_view.set_search_hits(hits)
+        page_view.clear_search()
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        assert rects == []
+
+    def test_set_adapter_clears_search(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        hits = [SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120)]
+        page_view.set_search_hits(hits)
+        page_view.set_adapter(adapter_with_doc)  # rebind same adapter
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        assert rects == []

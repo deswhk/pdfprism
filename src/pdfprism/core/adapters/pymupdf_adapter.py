@@ -10,7 +10,7 @@ from pdfprism.core.exceptions import (
     PageOutOfRangeError,
     PasswordRequiredError,
 )
-from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo
+from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo, SearchHit
 
 logger = logging.getLogger(__name__)
 
@@ -113,3 +113,25 @@ class PyMuPDFAdapter:
     def _require_open(self) -> None:
         if self._doc is None:
             raise DocumentOpenError("No document is currently open")
+
+    def search_page(self, index: int, term: str) -> list[SearchHit]:
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {index} out of range [0, {self._doc.page_count})"
+            )
+        if not term:
+            return []
+        page = self._doc[index]
+        rects = page.search_for(term)
+        return [
+            SearchHit(
+                page_index=index,
+                x0=float(r.x0),
+                y0=float(r.y0),
+                x1=float(r.x1),
+                y1=float(r.y1),
+            )
+            for r in rects
+        ]

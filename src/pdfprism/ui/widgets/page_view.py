@@ -1,17 +1,26 @@
-"""PageView widget: single-page PDF view with zoom and navigation."""
+"""PageView widget: single-page PDF view with zoom, navigation, search highlights."""
 
 from enum import StrEnum
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPainter, QResizeEvent, QWheelEvent
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QPainter,
+    QPen,
+    QResizeEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
 )
 
 from pdfprism.core.document import DocumentAdapter
+from pdfprism.core.types import SearchHit
 from pdfprism.ui.page_cache import PageCache
 
 
@@ -36,14 +45,20 @@ _MAX_ZOOM = 10.0
 _ZOOM_STEP_IN = 1.25
 _ZOOM_STEP_OUT = 0.8
 
+# Search-highlight colors. Semi-transparent so the underlying text stays
+# readable. Yellow for "all other matches on this page", orange for "the
+# one you're currently navigated to".
+_HIGHLIGHT_OTHER = QColor(255, 235, 59, 110)
+_HIGHLIGHT_CURRENT = QColor(255, 152, 0, 160)
+
 
 class PageView(QGraphicsView):
     """Zoomable, pannable view of one PDF page at a time.
 
-    Renders through a shared ``PageCache`` so that adjacent thumbnails or
-    repeat visits don't re-hit the adapter. State held: page count, current
-    page index, zoom mode, custom zoom ratio. The adapter itself lives in
-    the cache; this widget never holds it directly.
+    Renders through a shared ``PageCache``. Search highlights are drawn as
+    overlay rect items on the scene (not baked into the cached pixmap),
+    so they can be added, removed, and recolored without invalidating
+    the cache.
 
     Signals:
         page_changed(int): emitted when the displayed page index changes
@@ -71,6 +86,10 @@ class PageView(QGraphicsView):
         self._zoom_mode: ZoomMode = ZoomMode.FIT_PAGE
         self._custom_zoom: float = 1.0
 
+        self._search_hits: list[SearchHit] = []
+        self._current_hit: SearchHit | None = None
+        self._highlight_items: list[QGraphicsRectItem] = []
+
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -84,11 +103,14 @@ class PageView(QGraphicsView):
         """Bind to a document via the shared cache and render page 1.
 
         The cache's existing entries are cleared because they belonged to a
-        previous document. Pass ``None`` to unbind.
+        previous document. Search state is also cleared. Pass ``None`` to
+        unbind.
         """
         self._page_cache.set_adapter(adapter)
         self._page_count = adapter.page_count if adapter is not None else 0
         self._current_page = 0
+        self._search_hits = []
+        self._current_hit = None
         if self._page_count > 0:
             self._render_current_page()
             self.page_changed.emit(self._current_page)
@@ -97,8 +119,11 @@ class PageView(QGraphicsView):
         """Clear the view's local state. Leaves the shared cache alone."""
         self._scene.clear()
         self._pixmap_item = None
+        self._highlight_items = []
         self._page_count = 0
         self._current_page = 0
+        self._search_hits = []
+        self._current_hit = None
 
     # ----- read-only state -----
 
@@ -178,6 +203,36 @@ class PageView(QGraphicsView):
     def zoom_out(self) -> None:
         self.set_custom_zoom(self.effective_zoom * _ZOOM_STEP_OUT)
 
+    # ----- search highlights -----
+
+    def set_search_hits(self, hits: list[SearchHit]) -> None:
+        """Stash all search hits and redraw highlights for the current page.
+
+        Hits on other pages are kept in state and re-appear when the user
+        navigates to those pages.
+        """
+        self._search_hits = list(hits)
+        self._refresh_highlights()
+
+    def set_current_hit(self, hit: SearchHit | None) -> None:
+        """Mark ``hit`` as the active match (orange) and navigate to its page.
+
+        If ``hit`` lives on a different page than the one currently shown,
+        the view navigates to that page first; the highlight refresh runs
+        as part of rendering.
+        """
+        self._current_hit = hit
+        if hit is not None and hit.page_index != self._current_page:
+            self.go_to_page(hit.page_index)
+        else:
+            self._refresh_highlights()
+
+    def clear_search(self) -> None:
+        """Remove all search state and highlights."""
+        self._search_hits = []
+        self._current_hit = None
+        self._clear_highlight_items()
+
     # ----- rendering -----
 
     def _render_current_page(self) -> None:
@@ -185,9 +240,39 @@ class PageView(QGraphicsView):
             return
         pixmap = self._page_cache.get_or_render(self._current_page, zoom=_RENDER_SCALE)
         self._scene.clear()
+        self._highlight_items = []
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
         self._apply_zoom_mode()
+        self._refresh_highlights()
+
+    def _refresh_highlights(self) -> None:
+        self._clear_highlight_items()
+        if self._pixmap_item is None:
+            return
+        for hit in self._search_hits:
+            if hit.page_index != self._current_page:
+                continue
+            color = _HIGHLIGHT_CURRENT if hit == self._current_hit else _HIGHLIGHT_OTHER
+            self._add_highlight_rect(hit, color)
+
+    def _add_highlight_rect(self, hit: SearchHit, color: QColor) -> None:
+        item = QGraphicsRectItem(
+            hit.x0 * _RENDER_SCALE,
+            hit.y0 * _RENDER_SCALE,
+            (hit.x1 - hit.x0) * _RENDER_SCALE,
+            (hit.y1 - hit.y0) * _RENDER_SCALE,
+        )
+        item.setBrush(QBrush(color))
+        item.setPen(QPen(Qt.PenStyle.NoPen))
+        item.setZValue(1.0)
+        self._scene.addItem(item)
+        self._highlight_items.append(item)
+
+    def _clear_highlight_items(self) -> None:
+        for item in self._highlight_items:
+            self._scene.removeItem(item)
+        self._highlight_items = []
 
     def _apply_zoom_mode(self) -> None:
         if self._pixmap_item is None:

@@ -9,7 +9,7 @@ the adapter package.
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo
+from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo, SearchHit
 
 
 @runtime_checkable
@@ -66,5 +66,17 @@ class DocumentAdapter(Protocol):
 
         Returns an empty list if the document has no outline. The list is
         in document order; hierarchy is expressed via each item's ``level``.
+        """
+        ...
+
+    def search_page(self, index: int, term: str) -> list[SearchHit]:
+        """Find all matches of ``term`` on the page at ``index`` (0-based).
+
+        Case-insensitive for ASCII characters. Multi-word terms may span
+        line breaks. Returns an empty list if there are no matches or if
+        ``term`` is empty.
+
+        Raises:
+            PageOutOfRangeError: if ``index`` is outside the document range.
         """
         ...
