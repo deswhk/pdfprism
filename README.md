@@ -8,7 +8,7 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 Under active development. Milestone 1 (Reader Core) is the current focus; see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full 15-PR roadmap.
 
-**What works today (through PR 5):**
+**What works today (through PR 6):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
@@ -18,9 +18,11 @@ Under active development. Milestone 1 (Reader Core) is the current focus; see [`
 - Full-screen mode (F11) that hides menubar, toolbars, status bar, and docks while keeping all shortcuts live
 - Manual dark mode toggle, persisted across sessions
 - File → Open Recent submenu (last 10 documents) and a remembered last-used Open directory
+- Multi-document tabs: open many PDFs at once, switch with Ctrl+PgUp/PgDown, close with Ctrl+W
+- Cross-PDF search ("All open documents" scope): a right-side results panel groups matches by document; F3/Shift+F3 walk the flat result list across docs and auto-switch tabs at boundaries
 - Project-relative logging when running from source; OS-standard app-data location when packaged
 
-**Coming next (Milestone 1):** multi-document tabs and search across multiple PDFs.
+**Coming next:** Milestone 2 begins with PR 7 — text selection, copy, and extraction of text and images.
 
 ## Scope
 
@@ -70,7 +72,9 @@ Then `File > Open` (Ctrl+O) to choose a PDF, or pick one from `File > Open Recen
 | Action | Shortcut |
 |---|---|
 | Open | Ctrl+O |
-| Close document | Ctrl+W |
+| Close tab | Ctrl+W |
+| Previous tab | Ctrl+PgUp |
+| Next tab | Ctrl+PgDown |
 | Quit | Ctrl+Q |
 | Find | Ctrl+F |
 | Find next | F3 |

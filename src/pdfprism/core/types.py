@@ -63,3 +63,16 @@ class SearchHit:
     y0: float
     x1: float
     y1: float
+
+
+@dataclass(frozen=True)
+class CrossDocHit:
+    """A SearchHit tagged with its source document's index in a list of adapters.
+
+    The doc_index refers to the position of the originating adapter in the
+    list passed to SearchService.find_all_across. The caller (MainWindow)
+    maps that index back to a DocumentView / tab.
+    """
+
+    doc_index: int
+    hit: SearchHit
