@@ -1,4 +1,4 @@
-"""Main application window."""
+"""Main application window with multi-document tabs."""
 
 import logging
 from pathlib import Path
@@ -14,81 +14,107 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QStackedWidget,
+    QTabWidget,
     QToolBar,
     QWidget,
 )
 
 from pdfprism.config import MAX_RECENT_FILES
-from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.exceptions import PdfPrismError
-from pdfprism.core.types import SearchHit
-from pdfprism.services.search import SearchService
+from pdfprism.core.types import CrossDocHit
+from pdfprism.services.search import SearchScope, SearchService
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
-from pdfprism.ui.page_cache import PageCache
 from pdfprism.ui.theme import DARK_QSS
-from pdfprism.ui.widgets.outline_panel import OutlinePanel
-from pdfprism.ui.widgets.page_view import PageView, ViewMode
+from pdfprism.ui.widgets.document_view import DocumentView
+from pdfprism.ui.widgets.page_view import ViewMode
 from pdfprism.ui.widgets.search_bar import SearchBar
-from pdfprism.ui.widgets.thumbnail_panel import ThumbnailPanel
+from pdfprism.ui.widgets.search_results_panel import SearchResultsPanel
 
 logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Top-level application window."""
+    """Top-level window with tabbed multi-document support.
+
+    Per-document state (adapter, page cache, page view, sidebars, search
+    cursor) lives inside DocumentView. MainWindow holds the chrome and
+    coordinates tab management plus global UI state (full-screen, dark
+    mode, recent files, last-directory memory, cross-document search).
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("pdfprism")
         self.resize(1300, 1100)
 
-        self._adapter = PyMuPDFAdapter()
-        self._recent_menu: QMenu | None = None
-        self._page_cache = PageCache()
-        self._search_service = SearchService(self._adapter)
-        self._fullscreen_state: dict[str, bool] | None = None
         settings = QSettings()
+        self._fullscreen_state: dict[str, bool] | None = None
         self._dark_mode: bool = settings.value("view/dark_mode", False, type=bool)
+        self._recent_menu: QMenu | None = None
+        self._main_toolbar: QToolBar | None = None
+        self._active_tab: DocumentView | None = None
 
-        # Search cursor state (MainWindow owns this; PageView and SearchBar
-        # are told what to display).
-        self._search_hits: list[SearchHit] = []
-        self._current_hit_index: int = -1
+        # Cross-document search state. Populated by _on_find_all_open;
+        # walked by _on_find_next / _on_find_prev when scope is ALL_OPEN.
+        self._cross_search_results: list[CrossDocHit] = []
+        self._cross_search_index: int = -1
 
-        self._page_view = PageView(self._page_cache, self)
-        self.setCentralWidget(self._page_view)
+        # Central widget: stacked placeholder + tab widget.
+        self._stacked_central = QStackedWidget(self)
+        self.setCentralWidget(self._stacked_central)
 
-        # Sidebars
-        self._thumbnail_panel = ThumbnailPanel(self._page_cache, self)
-        self._outline_panel = OutlinePanel(self)
-        self._thumbnail_dock = self._make_dock("Thumbnails", self._thumbnail_panel)
-        self._outline_dock = self._make_dock("Outline", self._outline_panel)
+        self._empty_placeholder = QLabel(
+            "Open a PDF (Ctrl+O) or pick one from File \u2192 Open Recent"
+        )
+        self._empty_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_placeholder.setStyleSheet("color: gray; font-size: 14pt; padding: 40px;")
+
+        self._tab_widget = QTabWidget(self)
+        self._tab_widget.setTabsClosable(True)
+        self._tab_widget.setMovable(True)
+        self._tab_widget.setDocumentMode(True)
+        self._tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
+        self._tab_widget.currentChanged.connect(self._on_tab_changed)
+
+        self._stacked_central.addWidget(self._empty_placeholder)  # index 0
+        self._stacked_central.addWidget(self._tab_widget)  # index 1
+        self._stacked_central.setCurrentIndex(0)
+
+        # Sidebar docks (left): per-tab thumbnail/outline panels in stacks.
+        self._thumbnail_stack = QStackedWidget(self)
+        self._thumbnail_stack.addWidget(QWidget(self))
+        self._outline_stack = QStackedWidget(self)
+        self._outline_stack.addWidget(QWidget(self))
+
+        self._thumbnail_dock = self._make_dock("Thumbnails", self._thumbnail_stack)
+        self._outline_dock = self._make_dock("Outline", self._outline_stack)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._thumbnail_dock)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._outline_dock)
         self.tabifyDockWidget(self._thumbnail_dock, self._outline_dock)
         self._thumbnail_dock.raise_()
 
-        # Search bar in its own toolbar (hidden until Ctrl+F)
+        # Cross-search results dock (right); auto-shown on cross-search,
+        # auto-hidden on close-search or when a single-doc search runs.
+        self._results_panel = SearchResultsPanel(self)
+        self._results_dock = self._make_dock("Search Results", self._results_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._results_dock)
+        self._results_dock.setVisible(False)
+        self._results_panel.result_selected.connect(self._on_result_selected)
+
+        # Search bar in its own toolbar (hidden until Ctrl+F).
         self._search_bar = SearchBar(self)
         self._search_toolbar = QToolBar("Find", self)
         self._search_toolbar.setMovable(False)
         self._search_toolbar.addWidget(self._search_bar)
         self._search_toolbar.setVisible(False)
 
-        # Signal wiring
-        self._page_view.page_changed.connect(self._on_page_changed)
-        self._page_view.zoom_changed.connect(self._on_zoom_changed)
-        self._page_view.view_mode_changed.connect(self._on_view_mode_changed)
-        self._page_view.page_changed.connect(self._thumbnail_panel.set_current_page)
-        self._thumbnail_panel.page_selected.connect(self._page_view.go_to_page)
-        self._outline_panel.page_selected.connect(self._page_view.go_to_page)
-
         self._search_bar.find_requested.connect(self._on_find)
         self._search_bar.next_requested.connect(self._on_find_next)
         self._search_bar.prev_requested.connect(self._on_find_prev)
         self._search_bar.closed.connect(self._on_close_search)
 
-        # Status bar widgets
+        # Status bar widgets.
         self._page_indicator = QLabel("")
         self._zoom_indicator = QLabel("")
         self.statusBar().addPermanentWidget(self._page_indicator)
@@ -97,15 +123,12 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_menus()
         self._build_toolbar()
-        # Search toolbar goes below the main toolbar.
         self.addToolBarBreak()
         self.addToolBar(self._search_toolbar)
 
         self.act_toggle_dark_mode.setChecked(self._dark_mode)
         self._apply_theme()
-
         self._update_recent_menu()
-
         self._update_status_bar()
         self._update_actions_enabled()
 
@@ -123,20 +146,18 @@ class MainWindow(QMainWindow):
     # ----- actions, menus, toolbar -----
 
     def _build_actions(self) -> None:
-        # File
         self.act_open = QAction("&Open...", self)
         self.act_open.setShortcut(QKeySequence.StandardKey.Open)
         self.act_open.triggered.connect(self._on_open)
 
-        self.act_close_doc = QAction("&Close", self)
+        self.act_close_doc = QAction("&Close Tab", self)
         self.act_close_doc.setShortcut(QKeySequence.StandardKey.Close)
-        self.act_close_doc.triggered.connect(self._on_close_document)
+        self.act_close_doc.triggered.connect(self._on_close_tab)
 
         self.act_quit = QAction("&Quit", self)
         self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.act_quit.triggered.connect(self.close)
 
-        # Edit (Find)
         self.act_find = QAction("&Find...", self)
         self.act_find.setShortcut(QKeySequence.StandardKey.Find)
         self.act_find.triggered.connect(self._on_open_search)
@@ -149,40 +170,46 @@ class MainWindow(QMainWindow):
         self.act_find_prev.setShortcut(QKeySequence.StandardKey.FindPrevious)
         self.act_find_prev.triggered.connect(self._on_find_prev)
 
-        # Navigation
         self.act_first_page = QAction("&First Page", self)
         self.act_first_page.setShortcut("Ctrl+Home")
-        self.act_first_page.triggered.connect(self._page_view.first_page)
+        self.act_first_page.triggered.connect(self._nav_first)
 
         self.act_prev_page = QAction("&Previous Page", self)
         self.act_prev_page.setShortcut("PgUp")
-        self.act_prev_page.triggered.connect(self._page_view.prev_page)
+        self.act_prev_page.triggered.connect(self._nav_prev)
 
         self.act_next_page = QAction("&Next Page", self)
         self.act_next_page.setShortcut("PgDown")
-        self.act_next_page.triggered.connect(self._page_view.next_page)
+        self.act_next_page.triggered.connect(self._nav_next)
 
         self.act_last_page = QAction("&Last Page", self)
         self.act_last_page.setShortcut("Ctrl+End")
-        self.act_last_page.triggered.connect(self._page_view.last_page)
+        self.act_last_page.triggered.connect(self._nav_last)
 
         self.act_goto_page = QAction("&Go to Page...", self)
         self.act_goto_page.setShortcut("Ctrl+G")
         self.act_goto_page.triggered.connect(self._on_goto_page)
 
-        # View modes
+        self.act_next_tab = QAction("Next Tab", self)
+        self.act_next_tab.setShortcut("Ctrl+PgDown")
+        self.act_next_tab.triggered.connect(self._on_next_tab)
+
+        self.act_prev_tab = QAction("Previous Tab", self)
+        self.act_prev_tab.setShortcut("Ctrl+PgUp")
+        self.act_prev_tab.triggered.connect(self._on_prev_tab)
+
         self.act_single_page = QAction("&Single Page", self)
         self.act_single_page.setCheckable(True)
         self.act_single_page.setShortcut("Ctrl+3")
         self.act_single_page.triggered.connect(
-            lambda: self._page_view.set_view_mode(ViewMode.SINGLE_PAGE)
+            lambda: self._set_active_view_mode(ViewMode.SINGLE_PAGE)
         )
 
         self.act_continuous = QAction("&Continuous", self)
         self.act_continuous.setCheckable(True)
         self.act_continuous.setShortcut("Ctrl+4")
         self.act_continuous.triggered.connect(
-            lambda: self._page_view.set_view_mode(ViewMode.CONTINUOUS)
+            lambda: self._set_active_view_mode(ViewMode.CONTINUOUS)
         )
 
         self.view_mode_group = QActionGroup(self)
@@ -200,28 +227,26 @@ class MainWindow(QMainWindow):
         self.act_toggle_dark_mode.setCheckable(True)
         self.act_toggle_dark_mode.triggered.connect(self._on_toggle_dark_mode)
 
-        # View / Zoom
         self.act_fit_page = QAction("Fit &Page", self)
         self.act_fit_page.setShortcut("Ctrl+0")
-        self.act_fit_page.triggered.connect(self._page_view.set_fit_page)
+        self.act_fit_page.triggered.connect(self._on_fit_page)
 
         self.act_fit_width = QAction("Fit &Width", self)
         self.act_fit_width.setShortcut("Ctrl+1")
-        self.act_fit_width.triggered.connect(self._page_view.set_fit_width)
+        self.act_fit_width.triggered.connect(self._on_fit_width)
 
         self.act_actual_size = QAction("&Actual Size (100%)", self)
         self.act_actual_size.setShortcut("Ctrl+2")
-        self.act_actual_size.triggered.connect(self._page_view.set_actual_size)
+        self.act_actual_size.triggered.connect(self._on_actual_size)
 
         self.act_zoom_in = QAction("Zoom &In", self)
         self.act_zoom_in.setShortcuts([QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
-        self.act_zoom_in.triggered.connect(self._page_view.zoom_in)
+        self.act_zoom_in.triggered.connect(self._on_zoom_in)
 
         self.act_zoom_out = QAction("Zoom &Out", self)
         self.act_zoom_out.setShortcut("Ctrl+-")
-        self.act_zoom_out.triggered.connect(self._page_view.zoom_out)
+        self.act_zoom_out.triggered.connect(self._on_zoom_out)
 
-        # Dock toggles
         self.act_toggle_thumbnails = self._thumbnail_dock.toggleViewAction()
         self.act_toggle_thumbnails.setText("&Thumbnails")
         self.act_toggle_thumbnails.setShortcut("F4")
@@ -230,8 +255,6 @@ class MainWindow(QMainWindow):
         self.act_toggle_outline.setText("&Outline")
         self.act_toggle_outline.setShortcut("F5")
 
-        # Register all actions on the main window so their shortcuts remain
-        # active when menus and toolbars are hidden (e.g., in full-screen).
         for action in [
             self.act_open,
             self.act_close_doc,
@@ -244,6 +267,8 @@ class MainWindow(QMainWindow):
             self.act_next_page,
             self.act_last_page,
             self.act_goto_page,
+            self.act_next_tab,
+            self.act_prev_tab,
             self.act_single_page,
             self.act_continuous,
             self.act_fullscreen,
@@ -297,6 +322,9 @@ class MainWindow(QMainWindow):
         go_menu.addAction(self.act_last_page)
         go_menu.addSeparator()
         go_menu.addAction(self.act_goto_page)
+        go_menu.addSeparator()
+        go_menu.addAction(self.act_prev_tab)
+        go_menu.addAction(self.act_next_tab)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main", self)
@@ -316,6 +344,114 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.act_zoom_in)
         toolbar.addAction(self.act_zoom_out)
 
+    # ----- tab management -----
+
+    def _add_tab(self, doc_view: DocumentView) -> int:
+        """Add a DocumentView as a new tab; return the new tab index."""
+        # Add sidebar panels to their stacks BEFORE addTab, because
+        # addTab fires currentChanged synchronously when this is the
+        # first tab. _on_tab_changed runs from that signal and needs
+        # to find the panels already in the stacks to make them current.
+        self._thumbnail_stack.addWidget(doc_view.thumbnail_panel)
+        self._outline_stack.addWidget(doc_view.outline_panel)
+        tab_idx = self._tab_widget.addTab(doc_view, doc_view.path.name)
+        self._tab_widget.setTabToolTip(tab_idx, str(doc_view.path))
+        return tab_idx
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        doc_view = self._tab_widget.widget(index)
+        if not isinstance(doc_view, DocumentView):
+            return
+        # Cross-search results index tabs by position; removing a tab
+        # invalidates those indices, so drop the result set rather than
+        # try to remap.
+        if self._cross_search_results:
+            self._clear_cross_search()
+        self._thumbnail_stack.removeWidget(doc_view.thumbnail_panel)
+        self._outline_stack.removeWidget(doc_view.outline_panel)
+        self._tab_widget.removeTab(index)
+        doc_view.close_document()
+        doc_view.thumbnail_panel.deleteLater()
+        doc_view.outline_panel.deleteLater()
+        doc_view.deleteLater()
+        if self._tab_widget.count() == 0:
+            self._enter_empty_state()
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self._active_tab is not None:
+            try:
+                self._active_tab.page_changed.disconnect(self._on_page_changed)
+                self._active_tab.zoom_changed.disconnect(self._on_zoom_changed)
+                self._active_tab.view_mode_changed.disconnect(self._on_view_mode_changed)
+            except (RuntimeError, TypeError):
+                pass
+
+        if index < 0 or self._tab_widget.count() == 0:
+            self._enter_empty_state()
+            return
+
+        doc_view = self._tab_widget.widget(index)
+        if not isinstance(doc_view, DocumentView):
+            return
+
+        self._active_tab = doc_view
+        self._stacked_central.setCurrentIndex(1)
+        thumb_idx = self._thumbnail_stack.indexOf(doc_view.thumbnail_panel)
+        if thumb_idx >= 0:
+            self._thumbnail_stack.setCurrentIndex(thumb_idx)
+        outline_idx = self._outline_stack.indexOf(doc_view.outline_panel)
+        if outline_idx >= 0:
+            self._outline_stack.setCurrentIndex(outline_idx)
+
+        doc_view.page_changed.connect(self._on_page_changed)
+        doc_view.zoom_changed.connect(self._on_zoom_changed)
+        doc_view.view_mode_changed.connect(self._on_view_mode_changed)
+
+        mode = doc_view.page_view.view_mode
+        if mode == ViewMode.SINGLE_PAGE:
+            self.act_single_page.setChecked(True)
+        else:
+            self.act_continuous.setChecked(True)
+        self.setWindowTitle(f"pdfprism - {doc_view.path.name}")
+        self._update_status_bar()
+        self._update_actions_enabled()
+        # Closing the search toolbar on tab switch is right for single-doc
+        # search (each tab has its own state). For cross-search the result
+        # set spans tabs, so skip the close when cross-search is active --
+        # otherwise navigating across doc boundaries via _jump_to_cross_hit
+        # would drop the result set mid-walk.
+        if self._search_toolbar.isVisible() and not self._cross_search_results:
+            self._on_close_search()
+
+    def _enter_empty_state(self) -> None:
+        self._active_tab = None
+        self._stacked_central.setCurrentIndex(0)
+        self._thumbnail_stack.setCurrentIndex(0)
+        self._outline_stack.setCurrentIndex(0)
+        self.setWindowTitle("pdfprism")
+        if self._search_toolbar.isVisible():
+            self._on_close_search()
+        self._clear_cross_search()
+        self._update_status_bar()
+        self._update_actions_enabled()
+
+    def _on_next_tab(self) -> None:
+        if self._tab_widget.count() <= 1:
+            return
+        new_idx = (self._tab_widget.currentIndex() + 1) % self._tab_widget.count()
+        self._tab_widget.setCurrentIndex(new_idx)
+
+    def _on_prev_tab(self) -> None:
+        if self._tab_widget.count() <= 1:
+            return
+        new_idx = (self._tab_widget.currentIndex() - 1) % self._tab_widget.count()
+        self._tab_widget.setCurrentIndex(new_idx)
+
+    def _on_close_tab(self) -> None:
+        idx = self._tab_widget.currentIndex()
+        if idx >= 0:
+            self._on_tab_close_requested(idx)
+
     # ----- file slots -----
 
     def _on_open(self) -> None:
@@ -334,93 +470,221 @@ class MainWindow(QMainWindow):
             path = path.resolve(strict=False)
         except OSError:
             pass
+
+        doc_view = DocumentView(path, self)
         try:
-            self._adapter.open(path)
+            doc_view.open()
         except PdfPrismError as exc:
             logger.exception("Failed to open %s", path)
+            doc_view.deleteLater()
             QMessageBox.critical(self, "Open failed", str(exc))
-            # Adapter has already closed any previous document; sync UI.
-            self._reset_to_empty_state()
             return
 
-        self._reset_search_state()
-        self._page_view.set_adapter(self._adapter)
-        self._thumbnail_panel.set_adapter(self._adapter)
-        self._outline_panel.set_outline(self._adapter.get_outline())
-        self.setWindowTitle(f"pdfprism - {path.name}")
-        self._update_actions_enabled()
+        tab_idx = self._add_tab(doc_view)
+        self._tab_widget.setCurrentIndex(tab_idx)
         self._add_recent_file(path)
 
-    def _on_close_document(self) -> None:
-        self._reset_to_empty_state()
-        self._adapter.close()
+    # ----- navigation slots -----
 
-    def _reset_to_empty_state(self) -> None:
-        """Reset all UI to no-doc state. Does not touch the adapter."""
-        self._reset_search_state()
-        self._page_view.clear()
-        self._thumbnail_panel.set_adapter(None)
-        self._outline_panel.set_outline([])
-        self.setWindowTitle("pdfprism")
-        self._update_status_bar()
-        self._update_actions_enabled()
+    def _nav_first(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.first_page()
 
-    # ----- navigation slot -----
+    def _nav_prev(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.prev_page()
+
+    def _nav_next(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.next_page()
+
+    def _nav_last(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.last_page()
 
     def _on_goto_page(self) -> None:
-        page_count = self._page_view.page_count
+        if self._active_tab is None:
+            return
+        page_count = self._active_tab.page_view.page_count
         if page_count == 0:
             return
-        current_1based = self._page_view.current_page + 1
+        current_1based = self._active_tab.page_view.current_page + 1
         dialog = GotoPageDialog(current_1based, page_count, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._page_view.go_to_page(dialog.page_number - 1)
+            self._active_tab.page_view.go_to_page(dialog.page_number - 1)
+
+    # ----- zoom + view-mode slots -----
+
+    def _on_fit_page(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.set_fit_page()
+
+    def _on_fit_width(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.set_fit_width()
+
+    def _on_actual_size(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.set_actual_size()
+
+    def _on_zoom_in(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.zoom_in()
+
+    def _on_zoom_out(self) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.zoom_out()
+
+    def _set_active_view_mode(self, mode: ViewMode) -> None:
+        if self._active_tab is not None:
+            self._active_tab.page_view.set_view_mode(mode)
 
     # ----- search slots -----
 
     def _on_open_search(self) -> None:
+        if self._active_tab is None:
+            return
         self._search_toolbar.setVisible(True)
         self._search_bar.focus_input()
 
     def _on_close_search(self) -> None:
-        self._reset_search_state()
+        if self._active_tab is not None:
+            self._reset_search_state(self._active_tab)
+        self._clear_cross_search()
         self._search_toolbar.setVisible(False)
 
     def _on_find(self, term: str) -> None:
-        if self._page_view.page_count == 0:
+        if self._search_bar.search_scope == SearchScope.ALL_OPEN:
+            self._on_find_all_open(term)
             return
-        hits = self._search_service.find_all(term)
-        self._search_hits = hits
-        self._page_view.set_search_hits(hits)
+        # Single-doc search: any prior cross-search results no longer apply.
+        self._clear_cross_search()
+        if self._active_tab is None:
+            return
+        if self._active_tab.page_view.page_count == 0:
+            return
+        hits = self._active_tab.search_service.find_all(term)
+        self._active_tab.search_hits = hits
+        self._active_tab.page_view.set_search_hits(hits)
         if hits:
-            self._current_hit_index = 0
+            self._active_tab.current_hit_index = 0
             self._update_current_hit()
         else:
-            self._current_hit_index = -1
+            self._active_tab.current_hit_index = -1
             self._search_bar.set_match_count(0, 0)
 
-    def _on_find_next(self) -> None:
-        if not self._search_hits:
+    def _on_find_all_open(self, term: str) -> None:
+        """Search every open tab; populate the results dock and jump to hit 0."""
+        adapters = []
+        titles = []
+        for i in range(self._tab_widget.count()):
+            tab = self._tab_widget.widget(i)
+            if isinstance(tab, DocumentView):
+                adapters.append(tab.adapter)
+                titles.append(tab.path.name)
+        results = SearchService.find_all_across(adapters, term)
+        self._cross_search_results = results
+        self._results_panel.set_results(results, titles)
+        docs_with_hits = len({r.doc_index for r in results})
+        if results:
+            self._results_dock.setVisible(True)
+            self._cross_search_index = 0
+            self._jump_to_cross_hit(0)
+        else:
+            self._cross_search_index = -1
+            self._results_dock.setVisible(True)
+            self._search_bar.set_aggregate_count(0, 0)
+        logger.info(
+            "Cross-search %r: %d hits in %d documents",
+            term,
+            len(results),
+            docs_with_hits,
+        )
+
+    def _jump_to_cross_hit(self, index: int) -> None:
+        """Switch to the tab owning ``cross_search_results[index]`` and highlight it."""
+        if not (0 <= index < len(self._cross_search_results)):
             return
-        self._current_hit_index = (self._current_hit_index + 1) % len(self._search_hits)
+        self._cross_search_index = index
+        cross_hit = self._cross_search_results[index]
+        target_tab = self._tab_widget.widget(cross_hit.doc_index)
+        if not isinstance(target_tab, DocumentView):
+            return
+        # _on_tab_changed sees _cross_search_results is non-empty and skips
+        # closing the toolbar; no manual re-show needed here.
+        self._tab_widget.setCurrentIndex(cross_hit.doc_index)
+        # Clear stale highlights on non-target tabs.
+        for i in range(self._tab_widget.count()):
+            tab = self._tab_widget.widget(i)
+            if isinstance(tab, DocumentView) and tab is not target_tab:
+                tab.page_view.clear_search()
+        # Highlight only this hit on the target tab.
+        target_tab.page_view.set_search_hits([cross_hit.hit])
+        target_tab.page_view.set_current_hit(cross_hit.hit)
+        # Update counter + results panel selection.
+        docs_with_hits = len({r.doc_index for r in self._cross_search_results})
+        self._search_bar.set_aggregate_count(
+            len(self._cross_search_results), docs_with_hits, index + 1
+        )
+        self._results_panel.set_current(index)
+
+    def _on_result_selected(self, index: int) -> None:
+        self._jump_to_cross_hit(index)
+
+    def _on_find_next(self) -> None:
+        if self._search_bar.search_scope == SearchScope.ALL_OPEN:
+            if not self._cross_search_results:
+                return
+            new_idx = (self._cross_search_index + 1) % len(self._cross_search_results)
+            self._jump_to_cross_hit(new_idx)
+            return
+        if self._active_tab is None or not self._active_tab.search_hits:
+            return
+        self._active_tab.current_hit_index = (self._active_tab.current_hit_index + 1) % len(
+            self._active_tab.search_hits
+        )
         self._update_current_hit()
 
     def _on_find_prev(self) -> None:
-        if not self._search_hits:
+        if self._search_bar.search_scope == SearchScope.ALL_OPEN:
+            if not self._cross_search_results:
+                return
+            new_idx = (self._cross_search_index - 1) % len(self._cross_search_results)
+            self._jump_to_cross_hit(new_idx)
             return
-        self._current_hit_index = (self._current_hit_index - 1) % len(self._search_hits)
+        if self._active_tab is None or not self._active_tab.search_hits:
+            return
+        self._active_tab.current_hit_index = (self._active_tab.current_hit_index - 1) % len(
+            self._active_tab.search_hits
+        )
         self._update_current_hit()
 
     def _update_current_hit(self) -> None:
-        hit = self._search_hits[self._current_hit_index]
-        self._page_view.set_current_hit(hit)
-        self._search_bar.set_match_count(self._current_hit_index + 1, len(self._search_hits))
+        if self._active_tab is None:
+            return
+        hit = self._active_tab.search_hits[self._active_tab.current_hit_index]
+        self._active_tab.page_view.set_current_hit(hit)
+        self._search_bar.set_match_count(
+            self._active_tab.current_hit_index + 1,
+            len(self._active_tab.search_hits),
+        )
 
-    def _reset_search_state(self) -> None:
-        self._search_hits = []
-        self._current_hit_index = -1
-        self._page_view.clear_search()
+    def _reset_search_state(self, tab: DocumentView) -> None:
+        tab.search_hits = []
+        tab.current_hit_index = -1
+        tab.page_view.clear_search()
         self._search_bar.clear()
+
+    def _clear_cross_search(self) -> None:
+        """Drop cross-search results, hide the dock, clear per-tab highlights."""
+        self._cross_search_results = []
+        self._cross_search_index = -1
+        self._results_panel.clear()
+        self._results_dock.setVisible(False)
+        for i in range(self._tab_widget.count()):
+            tab = self._tab_widget.widget(i)
+            if isinstance(tab, DocumentView):
+                tab.page_view.clear_search()
 
     # ----- view-state slots -----
 
@@ -440,64 +704,82 @@ class MainWindow(QMainWindow):
     # ----- helpers -----
 
     def _update_status_bar(self) -> None:
-        page_count = self._page_view.page_count
+        if self._active_tab is None:
+            self._page_indicator.setText("")
+            self._zoom_indicator.setText("")
+            return
+        page_count = self._active_tab.page_view.page_count
         if page_count == 0:
             self._page_indicator.setText("")
             self._zoom_indicator.setText("")
             return
-        current_1based = self._page_view.current_page + 1
+        current_1based = self._active_tab.page_view.current_page + 1
         self._page_indicator.setText(f"Page {current_1based} of {page_count}")
-        zoom = self._page_view.effective_zoom
+        zoom = self._active_tab.page_view.effective_zoom
         self._zoom_indicator.setText(f"{int(round(zoom * 100))}%")
 
     def _update_actions_enabled(self) -> None:
-        has_doc = self._page_view.page_count > 0
-        current = self._page_view.current_page
-        page_count = self._page_view.page_count
+        active = self._active_tab
+        has_doc = active is not None and active.page_view.page_count > 0
+        current = active.page_view.current_page if active else 0
+        page_count = active.page_view.page_count if active else 0
 
-        self.act_close_doc.setEnabled(has_doc)
+        self.act_close_doc.setEnabled(active is not None)
         self.act_goto_page.setEnabled(has_doc)
         self.act_fit_page.setEnabled(has_doc)
         self.act_fit_width.setEnabled(has_doc)
         self.act_actual_size.setEnabled(has_doc)
         self.act_zoom_in.setEnabled(has_doc)
         self.act_zoom_out.setEnabled(has_doc)
-
         self.act_find.setEnabled(has_doc)
         self.act_find_next.setEnabled(has_doc)
         self.act_find_prev.setEnabled(has_doc)
-
+        self.act_single_page.setEnabled(has_doc)
+        self.act_continuous.setEnabled(has_doc)
         self.act_first_page.setEnabled(has_doc and current > 0)
         self.act_prev_page.setEnabled(has_doc and current > 0)
         self.act_next_page.setEnabled(has_doc and current < page_count - 1)
         self.act_last_page.setEnabled(has_doc and current < page_count - 1)
+        self.act_next_tab.setEnabled(self._tab_widget.count() > 1)
+        self.act_prev_tab.setEnabled(self._tab_widget.count() > 1)
 
     def _on_toggle_fullscreen(self) -> None:
         if self._fullscreen_state is None:
+            main_tb_visible = (
+                self._main_toolbar.isVisible() if self._main_toolbar is not None else True
+            )
             self._fullscreen_state = {
                 "menubar": self.menuBar().isVisible(),
-                "main_toolbar": self._main_toolbar.isVisible(),
+                "main_toolbar": main_tb_visible,
                 "search_toolbar": self._search_toolbar.isVisible(),
                 "statusbar": self.statusBar().isVisible(),
                 "thumbnail_dock": self._thumbnail_dock.isVisible(),
                 "outline_dock": self._outline_dock.isVisible(),
+                "results_dock": self._results_dock.isVisible(),
+                "tab_bar": self._tab_widget.tabBar().isVisible(),
             }
             self.menuBar().setVisible(False)
-            self._main_toolbar.setVisible(False)
+            if self._main_toolbar is not None:
+                self._main_toolbar.setVisible(False)
             self._search_toolbar.setVisible(False)
             self.statusBar().setVisible(False)
             self._thumbnail_dock.setVisible(False)
             self._outline_dock.setVisible(False)
+            self._results_dock.setVisible(False)
+            self._tab_widget.tabBar().setVisible(False)
             self.showFullScreen()
             self.act_fullscreen.setChecked(True)
         else:
             state = self._fullscreen_state
             self.menuBar().setVisible(state["menubar"])
-            self._main_toolbar.setVisible(state["main_toolbar"])
+            if self._main_toolbar is not None:
+                self._main_toolbar.setVisible(state["main_toolbar"])
             self._search_toolbar.setVisible(state["search_toolbar"])
             self.statusBar().setVisible(state["statusbar"])
             self._thumbnail_dock.setVisible(state["thumbnail_dock"])
             self._outline_dock.setVisible(state["outline_dock"])
+            self._results_dock.setVisible(state["results_dock"])
+            self._tab_widget.tabBar().setVisible(state["tab_bar"])
             self._fullscreen_state = None
             self.showNormal()
             self.act_fullscreen.setChecked(False)
@@ -564,6 +846,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         try:
-            self._adapter.close()
+            for i in range(self._tab_widget.count()):
+                doc_view = self._tab_widget.widget(i)
+                if isinstance(doc_view, DocumentView):
+                    doc_view.close_document()
         finally:
             super().closeEvent(event)

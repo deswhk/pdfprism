@@ -3,6 +3,7 @@
 import pytest
 from PySide6.QtCore import Qt
 
+from pdfprism.services.search import SearchScope
 from pdfprism.ui.widgets.search_bar import SearchBar
 
 
@@ -76,3 +77,45 @@ class TestClear:
         bar.clear()
         assert bar.search_term == ""
         assert bar._counter_label.text() == ""
+
+
+class TestScope:
+    def test_default_scope_is_current(self, bar: SearchBar) -> None:
+        assert bar.search_scope == SearchScope.CURRENT
+
+    def test_changing_scope_updates_property(self, bar: SearchBar) -> None:
+        bar._scope_combo.setCurrentIndex(1)
+        assert bar.search_scope == SearchScope.ALL_OPEN
+
+    def test_clear_does_not_reset_scope(self, bar: SearchBar) -> None:
+        bar._scope_combo.setCurrentIndex(1)
+        bar.clear()
+        assert bar.search_scope == SearchScope.ALL_OPEN
+
+
+class TestAggregateCount:
+    def test_zero_total_shows_no_matches(self, bar: SearchBar) -> None:
+        bar.set_aggregate_count(0, 0)
+        assert bar._counter_label.text() == "No matches"
+
+    def test_single_doc_shows_matches(self, bar: SearchBar) -> None:
+        bar.set_aggregate_count(5, 1)
+        assert bar._counter_label.text() == "5 matches"
+
+    def test_multi_doc_shows_total_in_docs(self, bar: SearchBar) -> None:
+        bar.set_aggregate_count(9, 2)
+        assert bar._counter_label.text() == "9 in 2 docs"
+
+
+class TestAggregatePosition:
+    def test_current_zero_falls_back_to_aggregate(self, bar: SearchBar) -> None:
+        bar.set_aggregate_count(5, 1, 0)
+        assert bar._counter_label.text() == "5 matches"
+
+    def test_single_doc_with_cursor(self, bar: SearchBar) -> None:
+        bar.set_aggregate_count(5, 1, 3)
+        assert bar._counter_label.text() == "3 of 5"
+
+    def test_multi_doc_with_cursor(self, bar: SearchBar) -> None:
+        bar.set_aggregate_count(9, 2, 4)
+        assert bar._counter_label.text() == "4 of 9 in 2 docs"
