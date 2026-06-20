@@ -61,26 +61,27 @@ engine swap (see above) is the first step.
 ```text
 src/pdfprism/
 ├── core/                        # Domain layer
-│   ├── types.py                 # PageInfo, DocumentInfo, OutlineItem (frozen dataclasses)
+│   ├── types.py                 # PageInfo, DocumentInfo, OutlineItem, SearchHit
 │   ├── exceptions.py            # PdfPrismError + specific subclasses
 │   ├── document.py              # DocumentAdapter Protocol
 │   └── adapters/
 │       └── pymupdf_adapter.py   # Concrete PyMuPDF implementation
-├── services/                    # Pure-logic operations (added per PR)
+├── services/                    # Pure-logic operations on documents
+│   ├── search.py                # PR 4: document-wide text search
 │   ├── pages.py                 # PR 8: rotate, delete, insert, reorder, etc.
 │   ├── security.py              # PR 10: password, permissions, sanitize
 │   ├── redaction.py             # PR 11: true content removal
 │   ├── ocr.py                   # PR 12: Tesseract pipeline
-│   ├── search.py                # PR 4, 6: single & multi-doc
 │   ├── extract.py               # PR 7: text, images
 │   ├── compare.py               # PR 15: visual diff
 │   ├── optimize.py              # PR 13: compress, linearize
 │   └── combine.py               # PR 14: PDFs + images + .txt
 ├── ui/                          # Qt widgets and windows
-│   ├── main_window.py           # Menus, toolbar, status bar, tabified left docks
+│   ├── main_window.py           # Menus, toolbar, search toolbar, status bar, docks
 │   ├── page_cache.py            # Thread-safe LRU pixmap cache (shared)
 │   ├── widgets/
-│   │   ├── page_view.py         # QGraphicsView page surface
+│   │   ├── page_view.py         # QGraphicsView page surface + highlight overlay
+│   │   ├── search_bar.py        # Find input + Prev/Next + counter
 │   │   ├── thumbnail_panel.py   # QListView thumbnail strip
 │   │   └── outline_panel.py     # QTreeView outline (TOC)
 │   └── dialogs/                 # goto_page; password (PR 10+), merge (PR 9+)
@@ -101,6 +102,8 @@ provide:
 - `get_page_info(index)` — per-page metadata
 - `render_page(index, zoom=1.0)` — PNG bytes
 - `get_outline()` — flat `list[OutlineItem]` in document order; empty if none
+- `search_page(index, term)` — flat `list[SearchHit]` for the given page;
+  case-insensitive for ASCII; empty list if no matches or empty term
 
 The protocol uses `@runtime_checkable` so it can be verified at runtime with
 `isinstance`. Each new adapter must satisfy this contract and pass an
@@ -112,7 +115,9 @@ The outline is returned as a flat list with hierarchy expressed through
 `OutlineItem.level` (1 = top-level chapter, 2 = child of the most recent
 level-1 entry, etc.). This matches PyMuPDF's `Document.get_toc()` shape and
 is what `OutlinePanel` converts into a tree. Page numbers are normalized to
-0-based here at the adapter boundary, never further up.
+0-based here at the adapter boundary, never further up. Search hit
+coordinates are in PDF page space (1 unit = 1/72 inch, origin top-left) —
+the same coordinate system as `render_page`'s output.
 
 ## The PageView Widget
 
@@ -123,6 +128,7 @@ a single PDF page. It subclasses `QGraphicsView` and holds:
 - Page count, current page index (0-based)
 - Current zoom mode (`FIT_PAGE`, `FIT_WIDTH`, `ACTUAL_SIZE`, or `CUSTOM`)
 - Custom zoom ratio (Acrobat-style; 1.0 = 100%)
+- Search state: list of `SearchHit`s and a pointer to the "current" one
 
 It does **not** hold the adapter directly — the cache does. `set_adapter`
 forwards to the cache and captures `page_count` locally.
@@ -217,6 +223,62 @@ There is intentionally no back-connect from `PageView` to `OutlinePanel`:
 multiple outline entries can target the same page, so there is no canonical
 "current outline item" to highlight.
 
+## Text Search
+
+In-document text search lives across three pieces: `services/search.py`
+(the document-wide aggregator), `ui/widgets/search_bar.py` (the input UI),
+and `PageView`'s highlight overlay (visual feedback). MainWindow owns the
+search cursor state and wires the three together.
+
+`SearchService.find_all(term)` walks the document via the adapter and
+returns a flat list of `SearchHit`s in page order. The service is thin
+today because the adapter's `search_page` already does the per-page work;
+the layer exists because the planned PR 4.5 adds case-sensitive and
+whole-word matching by extracting `page.get_text("words")` and filtering
+rect-by-rect, which is a service concern (operates above the adapter's
+native call) not an adapter concern.
+
+`SearchBar` (`QLineEdit` + Prev/Next buttons + match counter + close
+button) is a pure UI shell: it emits `find_requested(str)` on Enter (with
+whitespace stripped), `next_requested` and `prev_requested` on its
+buttons, and `closed` on the X button or Escape (caught via an event
+filter on the input so it works even when the input has focus). It does
+not know about the document or the service.
+
+`PageView` exposes `set_search_hits(list[SearchHit])`, `set_current_hit(
+SearchHit | None)`, and `clear_search()`. The hits are stashed in state;
+when the view renders any page, it filters hits to that page and draws
+each as a translucent `QGraphicsRectItem` on the scene at z-value 1
+(above the cached pixmap). Yellow for non-current hits, orange for the
+one `set_current_hit` points to. Because the highlights are scene
+overlays rather than baked into the pixmap, the `PageCache` is never
+invalidated by search, and the existing zoom transform scales highlights
+along with the page.
+
+**Signal wiring (MainWindow).**
+
+- `search_bar.find_requested(term) → _on_find`: runs the service, stashes
+  results, points the cursor at hit 0, calls `page_view.set_current_hit`,
+  updates the counter.
+- `search_bar.next_requested / prev_requested → _on_find_next /
+  _on_find_prev`: advance the cursor with Python `%` modulo for
+  Acrobat-style wrap, then `_update_current_hit`.
+- `search_bar.closed → _on_close_search`: clears state and hides the
+  toolbar.
+
+**Shortcuts** come from `QKeySequence.StandardKey`: `Ctrl+F` (Find),
+`F3` (FindNext), `Shift+F3` (FindPrevious) on Windows/Linux, with the Mac
+equivalents free if we ever ship there.
+
+**Known limitation.** PyMuPDF's `Page.search_for` returns rects in
+*unrotated* page coordinates. On pages with non-zero rotation (page 3 of
+the test fixture is rotated 90°), the highlight overlays will be
+misaligned with the rendered text. The fix is to pass `quads=True` and
+project the resulting `Quad` objects through the page's rotation
+transform. Tracked as a PR 4.5 candidate alongside case-sensitive and
+whole-word matching, since all three need above-adapter manipulation of
+PyMuPDF text data.
+
 ## Error Handling
 
 All errors raised by the core layer inherit from `PdfPrismError`:
@@ -257,11 +319,14 @@ becomes the logger name.
   subsections, then `Chapter 2: Conclusion`). Tests assert exact values.
 - **Adapter contract tests.** `tests/core/test_pymupdf_adapter.py` covers
   Protocol conformance, every method, and edge cases (missing file,
-  garbage file, out-of-range pages, idempotent close, outline parsing).
-- **UI widget tests** use `pytest-qt`'s `qtbot` fixture: instantiate the
-  widget, drive its public API, assert state and emitted signals. See
-  `tests/ui/test_page_view.py`, `test_page_cache.py`,
-  `test_thumbnail_panel.py`, `test_outline_panel.py`.
+  garbage file, out-of-range pages, idempotent close, outline parsing,
+  case-insensitive search, empty term, missing term).
+- **Service tests** (`tests/services/`) drive the service against a real
+  adapter on the test fixture; they verify document-order and aggregation
+  rather than mocking out the adapter.
+- **UI widget tests** (`tests/ui/`) use `pytest-qt`'s `qtbot` fixture:
+  instantiate the widget, drive its public API, assert state and emitted
+  signals.
 - **Autouse `qapp`.** `tests/ui/conftest.py` declares an autouse fixture
   that pulls in pytest-qt's `qapp`, so any test under `tests/ui/` can
   construct `QPixmap` and other `QPaintDevice` objects without crashing —
@@ -269,8 +334,8 @@ becomes the logger name.
   don't need a widget and the cache still constructs `QPixmap` instances.
 - **pytest fixtures for composition.** Top-level `conftest.py` provides
   `sample_pdf_path`, `garbage_file`, `missing_pdf_path`; per-test files
-  layer `adapter`, `opened_adapter`, `page_view`, `panel`,
-  `adapter_with_doc`, and `sample_outline` on top.
+  layer `adapter`, `opened_adapter`, `page_view`, `panel`, `bar`,
+  `service`, `adapter_with_doc`, and `sample_outline` on top.
 
 ## Roadmap
 
@@ -292,7 +357,14 @@ merges via PR review and CI on green.
   flat outline). Two tabified `QDockWidget`s on the left with View-menu
   toggles. `PageView` refactored to render through the shared cache;
   `DocumentAdapter` Protocol grew `get_outline()`.
-- PR 4: In-document text search.
+- **PR 4: In-document text search.** `SearchHit` type, `search_page` on the
+  Protocol, `SearchService` (services layer's first file). `SearchBar`
+  widget in a togglable top toolbar (Ctrl+F / F3 / Shift+F3 with Acrobat
+  wrap). `PageView` gained translucent overlay highlights (yellow others,
+  orange current) drawn on the scene above the cached pixmap so search
+  doesn't invalidate the cache. Case-insensitive substring only; case-
+  sensitive, whole-word, regex, and rotated-page rect alignment deferred
+  to PR 4.5.
 - PR 5: Continuous / two-up view modes, full-screen, dark mode, recent files.
 - PR 6: Multi-document tabs, search across multiple PDFs.
 
@@ -349,6 +421,9 @@ they are simply not on the v1 path.
   PyMuPDF if licensing intent ever shifts.
 - **Protocol** (Python). PEP 544 structural subtyping. Used here as the
   interface for `DocumentAdapter`.
+- **Quad.** A general quadrilateral in PDF coordinates. PyMuPDF returns
+  `Quad`s (rather than axis-aligned `Rect`s) when text is rotated, so the
+  bounding region tracks the glyph orientation correctly.
 - **Redaction.** Removing sensitive content from a PDF such that it cannot
   be recovered (not merely covering it visually).
 - **TOC.** Table of Contents. Synonym for "outline" in PDF terminology.
@@ -360,27 +435,32 @@ If you are new to the codebase, read in this order:
 
 1. `pyproject.toml` — what we depend on and how the project is built.
 2. `src/pdfprism/core/types.py` — the data shapes services and UI pass
-   around (`PageInfo`, `DocumentInfo`, `OutlineItem`).
+   around (`PageInfo`, `DocumentInfo`, `OutlineItem`, `SearchHit`).
 3. `src/pdfprism/core/exceptions.py` — the error vocabulary.
 4. `src/pdfprism/core/document.py` — the engine seam (read the docstrings).
 5. `src/pdfprism/core/adapters/pymupdf_adapter.py` — the only file that
    knows what PyMuPDF looks like.
-6. `src/pdfprism/ui/page_cache.py` — the rendering choke point; everything
+6. `src/pdfprism/services/search.py` — the first service; the shape future
+   services will follow.
+7. `src/pdfprism/ui/page_cache.py` — the rendering choke point; everything
    that displays a page goes through here.
-7. `src/pdfprism/ui/widgets/page_view.py` — the central page surface
-   (zoom, navigation, signals).
-8. `src/pdfprism/ui/widgets/thumbnail_panel.py` — `QListView` thumbnails
+8. `src/pdfprism/ui/widgets/page_view.py` — the central page surface
+   (zoom, navigation, signals, search highlights).
+9. `src/pdfprism/ui/widgets/thumbnail_panel.py` — `QListView` thumbnails
    over the shared cache.
-9. `src/pdfprism/ui/widgets/outline_panel.py` — `QTreeView` outline, with
-   the stack-based flat-to-tree conversion.
-10. `src/pdfprism/ui/main_window.py` — menus, toolbar, status bar, the two
-    tabified left docks, and the signal wiring that ties everything together.
-11. `src/pdfprism/app.py` — entry point and how everything wires together.
-12. `tests/core/test_pymupdf_adapter.py` — the adapter contract, as
+10. `src/pdfprism/ui/widgets/outline_panel.py` — `QTreeView` outline, with
+    the stack-based flat-to-tree conversion.
+11. `src/pdfprism/ui/widgets/search_bar.py` — find input, counter, signals.
+12. `src/pdfprism/ui/main_window.py` — menus, toolbar, status bar, the two
+    tabified left docks, the search toolbar, and the signal wiring that
+    ties everything together.
+13. `src/pdfprism/app.py` — entry point and how everything wires together.
+14. `tests/core/test_pymupdf_adapter.py` — the adapter contract, as
     assertions.
-13. `tests/ui/test_page_cache.py`, `test_page_view.py`,
-    `test_thumbnail_panel.py`, `test_outline_panel.py` — the UI surface,
-    as assertions.
+15. `tests/services/test_search.py` — service-level expectations.
+16. `tests/ui/test_page_cache.py`, `test_page_view.py`,
+    `test_thumbnail_panel.py`, `test_outline_panel.py`,
+    `test_search_bar.py` — the UI surface, as assertions.
 
 When adding a new feature, work bottom-up: extend the Protocol if needed,
 implement in the adapter, add or extend a service, then wire it into the UI.

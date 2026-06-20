@@ -11,7 +11,7 @@ from pdfprism.core.exceptions import (
     DocumentOpenError,
     PageOutOfRangeError,
 )
-from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo
+from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo, SearchHit
 
 # PNG file signature
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -135,3 +135,43 @@ class TestGetOutline:
     def test_second_chapter(self, opened_adapter: PyMuPDFAdapter) -> None:
         outline = opened_adapter.get_outline()
         assert outline[3] == OutlineItem(level=1, title="Chapter 2: Conclusion", page_index=2)
+
+
+class TestSearch:
+    def test_finds_known_term(self, opened_adapter: PyMuPDFAdapter) -> None:
+        hits = opened_adapter.search_page(0, "pdfprism")
+        assert len(hits) == 1
+        assert isinstance(hits[0], SearchHit)
+        assert hits[0].page_index == 0
+
+    def test_finds_term_on_each_page(self, opened_adapter: PyMuPDFAdapter) -> None:
+        # "Page" appears in "Page N of 3" on every page
+        for i in range(3):
+            hits = opened_adapter.search_page(i, "Page")
+            assert len(hits) >= 1
+            assert all(h.page_index == i for h in hits)
+
+    def test_case_insensitive_matching(self, opened_adapter: PyMuPDFAdapter) -> None:
+        upper = opened_adapter.search_page(0, "PAGE")
+        lower = opened_adapter.search_page(0, "page")
+        assert len(upper) == len(lower)
+        assert len(upper) >= 1
+
+    def test_missing_term_returns_empty(self, opened_adapter: PyMuPDFAdapter) -> None:
+        assert opened_adapter.search_page(0, "thiswordisnotinthedoc") == []
+
+    def test_empty_term_returns_empty(self, opened_adapter: PyMuPDFAdapter) -> None:
+        assert opened_adapter.search_page(0, "") == []
+
+    def test_out_of_range_raises(self, opened_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            opened_adapter.search_page(99, "anything")
+
+    def test_hit_rect_is_well_formed(self, opened_adapter: PyMuPDFAdapter) -> None:
+        hits = opened_adapter.search_page(0, "pdfprism")
+        assert len(hits) == 1
+        h = hits[0]
+        assert h.x0 > 0
+        assert h.y0 > 0
+        assert h.x1 > h.x0
+        assert h.y1 > h.y0

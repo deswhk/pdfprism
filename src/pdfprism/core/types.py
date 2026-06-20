@@ -45,3 +45,21 @@ class OutlineItem:
     level: int
     title: str
     page_index: int
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """A single match of a search term on a page.
+
+    Coordinates are in PDF page space (1 unit = 1/72 inch, origin top-left),
+    matching ``DocumentAdapter.render_page`` coordinates. Consumers that
+    overlay highlights on a rendered pixmap scale by their render-zoom
+    factor. Equality is structural (frozen dataclass), so tests can compare
+    hits directly.
+    """
+
+    page_index: int
+    x0: float
+    y0: float
+    x1: float
+    y1: float
