@@ -391,3 +391,53 @@ class PyMuPDFAdapter:
         except (OSError, RuntimeError) as exc:
             raise DocumentSaveError(f"Save failed: {exc}") from exc
         self._is_dirty = False
+
+    def new_document(self) -> None:
+        """Open a new empty in-memory PDF; close any prior open doc."""
+        self.close()
+        self._doc = pymupdf.open()
+        self._path = None
+        self._is_dirty = False
+
+    def insert_pdf(
+        self,
+        source: "PyMuPDFAdapter",
+        from_index: int,
+        to_index: int,
+        at_index: int,
+    ) -> None:
+        """Insert source[from_index..to_index] (inclusive) before at_index."""
+        self._require_open()
+        assert self._doc is not None
+        # Validate source is open. We deliberately reach for the
+        # private _doc attribute -- insert_pdf is engine-internal
+        # (PyMuPDF's Document.insert_pdf wants a pymupdf.Document
+        # for the source) and we only have one adapter implementation.
+        src_doc = getattr(source, "_doc", None)
+        if src_doc is None:
+            raise PageOperationError("insert_pdf: source adapter has no open document")
+        src_count = src_doc.page_count
+        if from_index < 0 or from_index >= src_count:
+            raise PageOutOfRangeError(
+                f"insert_pdf: from_index {from_index} out of range [0, {src_count})"
+            )
+        if to_index < from_index or to_index >= src_count:
+            raise PageOutOfRangeError(
+                f"insert_pdf: to_index {to_index} out of range [{from_index}, {src_count})"
+            )
+        target_count = self._doc.page_count
+        if at_index < 0 or at_index > target_count:
+            raise PageOutOfRangeError(
+                f"insert_pdf: at_index {at_index} out of range [0, {target_count}]"
+            )
+        # PyMuPDF: start_at=-1 means append; else insert before that
+        # 0-based index in the destination. Our contract uses
+        # target_count to mean append, so translate.
+        start_at = -1 if at_index == target_count else at_index
+        self._doc.insert_pdf(
+            src_doc,
+            from_page=from_index,
+            to_page=to_index,
+            start_at=start_at,
+        )
+        self._is_dirty = True

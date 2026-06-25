@@ -190,6 +190,22 @@ class DocumentView(QWidget):
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
 
+    def insert_from(
+        self,
+        source_path: Path,
+        from_index: int,
+        to_index: int,
+        at_index: int,
+    ) -> None:
+        """Insert pages from another PDF on disk into this document."""
+        from pdfprism.services.pages import PageService
+
+        PageService(self._adapter).insert_from(source_path, from_index, to_index, at_index)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
     # ---- Save ------------------------------------------------------------
 
     def save(self) -> None:
