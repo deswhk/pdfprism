@@ -6,6 +6,30 @@ consumed by services and UI without coupling them to any PDF library.
 
 from dataclasses import dataclass
 
+Quad = tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]
+"""Four corner points (upper-left, upper-right, lower-right, lower-left)."""
+
+
+@dataclass(frozen=True)
+class Word:
+    """A single extracted word in PDF page space.
+
+    Coordinates match ``SearchHit`` and ``DocumentAdapter.render_page``
+    (1 unit = 1/72 inch, origin top-left). Used by the search service for
+    case-sensitive and whole-word matching above the adapter.
+    """
+
+    text: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
 
 @dataclass(frozen=True)
 class PageInfo:
@@ -63,6 +87,7 @@ class SearchHit:
     y0: float
     x1: float
     y1: float
+    quad: Quad | None = None
 
 
 @dataclass(frozen=True)

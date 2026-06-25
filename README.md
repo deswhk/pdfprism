@@ -8,13 +8,13 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 Under active development. Milestone 1 (Reader Core) is the current focus; see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full 15-PR roadmap.
 
-**What works today (through PR 6):**
+**What works today (through PR 4.5):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
 - Page navigation: prev/next/first/last, go-to-page dialog, full keyboard shortcut surface
 - Thumbnail sidebar and outline (TOC) sidebar — dockable, tabified on the left, toggle via the View menu
-- In-document text search (case-insensitive substring) with yellow/orange highlight overlays and Acrobat-style wrap; highlights span every visible page in continuous mode and scroll the current hit into view
+- In-document text search with case-sensitive (`Aa`) and whole-word (`[w]`) toggle buttons, yellow/orange highlight overlays, and Acrobat-style wrap; highlights span every visible page in continuous mode and scroll the current hit into view; search hits on rotated pages now project through the page rotation so the overlay tracks the displayed text
 - Full-screen mode (F11) that hides menubar, toolbars, status bar, and docks while keeping all shortcuts live
 - Manual dark mode toggle, persisted across sessions
 - File → Open Recent submenu (last 10 documents) and a remembered last-used Open directory
@@ -22,7 +22,7 @@ Under active development. Milestone 1 (Reader Core) is the current focus; see [`
 - Cross-PDF search ("All open documents" scope): a right-side results panel groups matches by document; F3/Shift+F3 walk the flat result list across docs and auto-switch tabs at boundaries
 - Project-relative logging when running from source; OS-standard app-data location when packaged
 
-**Coming next:** Milestone 2 begins with PR 7 — text selection, copy, and extraction of text and images.
+**Coming next:** Milestone 2 begins with PR 7 — text selection, copy, and extraction of text and images. Per-hit snippets in the cross-search results panel land as a side-effect.
 
 ## Scope
 

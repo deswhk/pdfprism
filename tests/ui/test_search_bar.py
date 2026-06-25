@@ -119,3 +119,57 @@ class TestAggregatePosition:
     def test_multi_doc_with_cursor(self, bar: SearchBar) -> None:
         bar.set_aggregate_count(9, 2, 4)
         assert bar._counter_label.text() == "4 of 9 in 2 docs"
+
+
+class TestToggles:
+    def test_defaults_off(self, qtbot):
+        from pdfprism.ui.widgets.search_bar import SearchBar
+
+        b = SearchBar()
+        qtbot.addWidget(b)
+        assert b.case_sensitive is False
+        assert b.whole_word is False
+
+    def test_case_button_toggles_property(self, qtbot):
+        from pdfprism.ui.widgets.search_bar import SearchBar
+
+        b = SearchBar()
+        qtbot.addWidget(b)
+        b._case_btn.setChecked(True)
+        assert b.case_sensitive is True
+        b._case_btn.setChecked(False)
+        assert b.case_sensitive is False
+
+    def test_whole_word_button_toggles_property(self, qtbot):
+        from pdfprism.ui.widgets.search_bar import SearchBar
+
+        b = SearchBar()
+        qtbot.addWidget(b)
+        b._whole_btn.setChecked(True)
+        assert b.whole_word is True
+        b._whole_btn.setChecked(False)
+        assert b.whole_word is False
+
+    def test_toggles_are_independent(self, qtbot):
+        from pdfprism.ui.widgets.search_bar import SearchBar
+
+        b = SearchBar()
+        qtbot.addWidget(b)
+        b._case_btn.setChecked(True)
+        assert b.case_sensitive is True
+        assert b.whole_word is False
+        b._whole_btn.setChecked(True)
+        assert b.case_sensitive is True
+        assert b.whole_word is True
+
+    def test_clear_does_not_reset_toggles(self, qtbot):
+        """Matches the scope dropdown convention: clear() leaves modifier state alone."""
+        from pdfprism.ui.widgets.search_bar import SearchBar
+
+        b = SearchBar()
+        qtbot.addWidget(b)
+        b._case_btn.setChecked(True)
+        b._whole_btn.setChecked(True)
+        b.clear()
+        assert b.case_sensitive is True
+        assert b.whole_word is True

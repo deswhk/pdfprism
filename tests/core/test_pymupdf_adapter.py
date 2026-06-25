@@ -175,3 +175,98 @@ class TestSearch:
         assert h.y0 > 0
         assert h.x1 > h.x0
         assert h.y1 > h.y0
+
+
+class TestExtractWords:
+    def test_extracts_words_on_first_page(self, sample_pdf_path: Path) -> None:
+        a = PyMuPDFAdapter()
+        a.open(sample_pdf_path)
+        try:
+            words = a.extract_words(0)
+        finally:
+            a.close()
+        assert len(words) >= 3
+        texts = [w.text for w in words]
+        assert "Hello" in texts
+        assert "pdfprism" in texts
+
+    def test_word_has_positive_extent(self, sample_pdf_path: Path) -> None:
+        a = PyMuPDFAdapter()
+        a.open(sample_pdf_path)
+        try:
+            word = a.extract_words(0)[0]
+        finally:
+            a.close()
+        assert word.x1 > word.x0
+        assert word.y1 > word.y0
+
+    def test_out_of_range_raises(self, sample_pdf_path: Path) -> None:
+        a = PyMuPDFAdapter()
+        a.open(sample_pdf_path)
+        try:
+            with pytest.raises(PageOutOfRangeError):
+                a.extract_words(99)
+        finally:
+            a.close()
+
+    def test_each_page_has_words(self, sample_pdf_path: Path) -> None:
+        a = PyMuPDFAdapter()
+        a.open(sample_pdf_path)
+        try:
+            for i in range(a.page_count):
+                assert len(a.extract_words(i)) > 0
+        finally:
+            a.close()
+
+
+class TestRotationProjection:
+    """Rotation fix: search hits and extracted words land in layout space."""
+
+    def test_rotated_page_hit_has_quad(self, sample_pdf_path: Path) -> None:
+        a = PyMuPDFAdapter()
+        a.open(sample_pdf_path)
+        try:
+            hits = a.search_page(2, "Page")
+        finally:
+            a.close()
+        assert len(hits) == 1
+        assert hits[0].quad is not None
+
+    def test_rotated_hit_bbox_in_layout_space(self, sample_pdf_path: Path) -> None:
+        """On a 90-rotated A4 page (layout 595x842), 'Page' should appear
+        on the right edge (x ~490-510) rather than the upper-left where
+        the unrotated coordinates would put it."""
+        a = PyMuPDFAdapter()
+        a.open(sample_pdf_path)
+        try:
+            hit = a.search_page(2, "Page")[0]
+        finally:
+            a.close()
+        assert hit.x0 > 400, f"x0={hit.x0} should be on the right side of the rotated page"
+        assert hit.x1 < 595
+        assert hit.y0 < 200
+
+    def test_unrotated_page_hit_quad_is_none(self, sample_pdf_path: Path) -> None:
+        """Backward compat: rotation-0 hits leave quad as None."""
+        a = PyMuPDFAdapter()
+        a.open(sample_pdf_path)
+        try:
+            hits = a.search_page(0, "Page")
+        finally:
+            a.close()
+        assert hits[0].quad is None
+
+    def test_rotated_extract_words_in_layout_space(self, sample_pdf_path: Path) -> None:
+        """extract_words projects through rotation_matrix so the slow
+        path (case-sensitive / whole-word) hits also land correctly."""
+        a = PyMuPDFAdapter()
+        a.open(sample_pdf_path)
+        try:
+            words = a.extract_words(2)
+        finally:
+            a.close()
+        page_words = [w for w in words if w.text == "Page"]
+        assert len(page_words) == 1
+        w = page_words[0]
+        assert w.x0 > 400
+        assert w.x1 < 595
