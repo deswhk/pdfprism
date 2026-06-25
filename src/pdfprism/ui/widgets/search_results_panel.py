@@ -14,8 +14,9 @@ class SearchResultsPanel(QWidget):
     emits ``result_selected`` with the hit's index in the flat results
     list, so MainWindow can switch to that tab and jump to the hit.
 
-    Per-hit snippets are intentionally deferred to PR 7 (text extraction)
-    so this panel does not depend on any new adapter capability.
+    Per-hit snippets are optional; when provided, each row shows
+    ``Page N: snippet...``, otherwise just ``Page N``. Empty snippets
+    (no extractable text on that line) silently fall back to ``Page N``.
     """
 
     result_selected = Signal(int)
@@ -31,11 +32,20 @@ class SearchResultsPanel(QWidget):
         self._tree.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self._tree)
 
-    def set_results(self, results: list[CrossDocHit], doc_titles: list[str]) -> None:
+    def set_results(
+        self,
+        results: list[CrossDocHit],
+        doc_titles: list[str],
+        snippets: list[str] | None = None,
+    ) -> None:
         """Populate the tree, grouping results by ``doc_index``.
 
         ``doc_titles`` is indexed by ``doc_index``; missing indices fall
         back to a generic ``Document N`` label.
+
+        ``snippets`` is parallel to ``results``; when provided, each hit
+        row reads ``Page N: snippet``. Empty snippets (no extractable
+        text) fall back to plain ``Page N``.
         """
         self._tree.clear()
         if not results:
@@ -53,7 +63,17 @@ class SearchResultsPanel(QWidget):
             doc_item = QTreeWidgetItem([f"{title} ({len(hits)} hits)"])
             self._tree.addTopLevelItem(doc_item)
             for flat_index, r in hits:
-                hit_item = QTreeWidgetItem([f"Page {r.hit.page_index + 1}"])
+                snippet = (
+                    snippets[flat_index]
+                    if snippets is not None and flat_index < len(snippets)
+                    else ""
+                )
+                label = (
+                    f"Page {r.hit.page_index + 1}: {snippet}"
+                    if snippet
+                    else f"Page {r.hit.page_index + 1}"
+                )
+                hit_item = QTreeWidgetItem([label])
                 hit_item.setData(0, Qt.ItemDataRole.UserRole, flat_index)
                 doc_item.addChild(hit_item)
             doc_item.setExpanded(True)

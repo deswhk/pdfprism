@@ -9,7 +9,7 @@ the adapter package.
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo, SearchHit
+from pdfprism.core.types import DocumentInfo, ExtractedImage, OutlineItem, PageInfo, SearchHit, Word
 
 
 @runtime_checkable
@@ -75,6 +75,42 @@ class DocumentAdapter(Protocol):
         Case-insensitive for ASCII characters. Multi-word terms may span
         line breaks. Returns an empty list if there are no matches or if
         ``term`` is empty.
+
+        Raises:
+            PageOutOfRangeError: if ``index`` is outside the document range.
+        """
+        ...
+
+    def extract_words(self, index: int) -> list[Word]:
+        """Return all words on the page at ``index`` in reading order.
+
+        Coordinates are in PDF page space (1 unit = 1/72 inch, origin
+        top-left), the same convention as ``SearchHit``. Used by the
+        search service slow path and by rect-based text extraction.
+
+        Raises:
+            PageOutOfRangeError: if ``index`` is outside the document range.
+        """
+        ...
+
+    def extract_text(self, index: int) -> str:
+        """Return all text on the page at ``index`` in reading order.
+
+        Returns an empty string if the page has no text content (image
+        only, blank, etc.). No layout, no font information; for that,
+        use ``extract_words``.
+
+        Raises:
+            PageOutOfRangeError: if ``index`` is outside the document range.
+        """
+        ...
+
+    def extract_images(self, index: int) -> list[ExtractedImage]:
+        """Return all images on the page at ``index`` with raw bytes.
+
+        Returns an empty list if the page has no embedded images.
+        Each ``ExtractedImage`` carries the engine xref so duplicates
+        across pages can be detected if needed.
 
         Raises:
             PageOutOfRangeError: if ``index`` is outside the document range.

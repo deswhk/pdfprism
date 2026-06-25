@@ -101,3 +101,15 @@ class CrossDocHit:
 
     doc_index: int
     hit: SearchHit
+
+
+@dataclass(frozen=True)
+class ExtractedImage:
+    """A single image extracted from a PDF page."""
+
+    page_index: int
+    xref: int
+    width: int
+    height: int
+    ext: str
+    data: bytes

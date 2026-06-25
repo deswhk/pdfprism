@@ -17,11 +17,13 @@ from PySide6.QtWidgets import (
     QGraphicsPolygonItem,
     QGraphicsScene,
     QGraphicsView,
+    QMenu,
     QWidget,
 )
 
 from pdfprism.core.document import DocumentAdapter
-from pdfprism.core.types import SearchHit
+from pdfprism.core.types import SearchHit, Word
+from pdfprism.services.extract import _join_words_as_lines
 from pdfprism.ui.page_cache import PageCache
 
 
@@ -41,6 +43,14 @@ class ViewMode(StrEnum):
     CONTINUOUS = "continuous"
 
 
+class ToolMode(StrEnum):
+    """Active mouse-drag tool. HAND pans the view (default); SELECT
+    drag-selects text via word-rect hit-testing."""
+
+    HAND = "hand"
+    SELECT = "select"
+
+
 _RENDER_SCALE = 2.0
 _MIN_ZOOM = 0.1
 _MAX_ZOOM = 10.0
@@ -52,6 +62,7 @@ _PAGE_SPACING = 24.0
 
 _HIGHLIGHT_OTHER = QColor(255, 235, 59, 110)
 _HIGHLIGHT_CURRENT = QColor(255, 152, 0, 160)
+_HIGHLIGHT_SELECTION = QColor(33, 150, 243, 110)
 
 
 class PageView(QGraphicsView):
@@ -79,6 +90,10 @@ class PageView(QGraphicsView):
     page_changed = Signal(int)
     zoom_changed = Signal(float)
     view_mode_changed = Signal(ViewMode)
+    tool_mode_changed = Signal(ToolMode)
+    selection_changed = Signal(str)
+    copy_requested = Signal()
+    extract_selection_requested = Signal()
 
     def __init__(
         self,
@@ -102,6 +117,10 @@ class PageView(QGraphicsView):
         self._search_hits: list[SearchHit] = []
         self._current_hit: SearchHit | None = None
         self._highlight_items: list[QGraphicsPolygonItem] = []
+        self._tool_mode: ToolMode = ToolMode.HAND
+        self._selected_words: list[Word] = []
+        self._selection_items: list[QGraphicsPolygonItem] = []
+        self._selection_anchor: QPointF | None = None
 
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -386,6 +405,123 @@ class PageView(QGraphicsView):
         for item in self._highlight_items:
             self._scene.removeItem(item)
         self._highlight_items = []
+
+    # ----- tool mode + selection -----
+
+    @property
+    def tool_mode(self) -> ToolMode:
+        return self._tool_mode
+
+    @property
+    def selected_text(self) -> str:
+        """Selected text in reading order; empty string if no selection."""
+        return _join_words_as_lines(self._selected_words)
+
+    def set_tool_mode(self, mode: ToolMode) -> None:
+        if mode == self._tool_mode:
+            return
+        self._tool_mode = mode
+        if mode == ToolMode.HAND:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+        self.clear_selection()
+        self.tool_mode_changed.emit(mode)
+
+    def clear_selection(self) -> None:
+        if not self._selected_words and not self._selection_items:
+            return
+        self._selected_words = []
+        for item in self._selection_items:
+            self._scene.removeItem(item)
+        self._selection_items = []
+        self._selection_anchor = None
+        self.selection_changed.emit("")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._tool_mode == ToolMode.SELECT and event.button() == Qt.MouseButton.LeftButton:
+            self.clear_selection()
+            self._selection_anchor = self.mapToScene(event.position().toPoint())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._tool_mode == ToolMode.SELECT and self._selection_anchor is not None:
+            current = self.mapToScene(event.position().toPoint())
+            self._update_selection_from_drag(self._selection_anchor, current)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if (
+            self._tool_mode == ToolMode.SELECT
+            and self._selection_anchor is not None
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._selection_anchor = None
+            self.selection_changed.emit(self.selected_text)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _update_selection_from_drag(self, anchor: QPointF, current: QPointF) -> None:
+        adapter = self._page_cache.adapter
+        if adapter is None or self._page_count == 0:
+            return
+        if self._view_mode != ViewMode.SINGLE_PAGE:
+            return
+        x0 = min(anchor.x(), current.x()) / _RENDER_SCALE
+        y0 = min(anchor.y(), current.y()) / _RENDER_SCALE
+        x1 = max(anchor.x(), current.x()) / _RENDER_SCALE
+        y1 = max(anchor.y(), current.y()) / _RENDER_SCALE
+        try:
+            words = adapter.extract_words(self._current_page)
+        except Exception:
+            return
+        overlapping = [w for w in words if w.x0 < x1 and w.x1 > x0 and w.y0 < y1 and w.y1 > y0]
+        if overlapping == self._selected_words:
+            return
+        self._selected_words = overlapping
+        self._refresh_selection_overlay()
+
+    def _refresh_selection_overlay(self) -> None:
+        for item in self._selection_items:
+            self._scene.removeItem(item)
+        self._selection_items = []
+        for w in self._selected_words:
+            polygon = QPolygonF(
+                [
+                    QPointF(w.x0 * _RENDER_SCALE, w.y0 * _RENDER_SCALE),
+                    QPointF(w.x1 * _RENDER_SCALE, w.y0 * _RENDER_SCALE),
+                    QPointF(w.x1 * _RENDER_SCALE, w.y1 * _RENDER_SCALE),
+                    QPointF(w.x0 * _RENDER_SCALE, w.y1 * _RENDER_SCALE),
+                ]
+            )
+            item = QGraphicsPolygonItem(polygon)
+            item.setBrush(QBrush(_HIGHLIGHT_SELECTION))
+            item.setPen(QPen(Qt.PenStyle.NoPen))
+            item.setZValue(1.0)
+            self._scene.addItem(item)
+            self._selection_items.append(item)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        """Right-click context menu. Always available regardless of
+        tool mode -- Copy / Extract on a selection are useful even if
+        the user happened to make the selection then switched modes.
+        Both actions are disabled when no text is selected."""
+        has_selection = bool(self._selected_words)
+        menu = QMenu(self)
+        copy_action = menu.addAction("&Copy")
+        copy_action.setEnabled(has_selection)
+        copy_action.triggered.connect(self.copy_requested.emit)
+        extract_action = menu.addAction("&Extract Selection to File...")
+        extract_action.setEnabled(has_selection)
+        extract_action.triggered.connect(self.extract_selection_requested.emit)
+        menu.exec(event.globalPos())
 
     def _current_pixmap_item(self) -> QGraphicsPixmapItem | None:
         if not self._pixmap_items:

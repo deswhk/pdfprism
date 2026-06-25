@@ -39,6 +39,11 @@ class PageCache:
             self._adapter = adapter
             self._cache.clear()
 
+    @property
+    def adapter(self) -> "DocumentAdapter | None":
+        """The currently bound adapter, or None if unbound."""
+        return self._adapter
+
     def get(self, page_index: int, zoom: float) -> QPixmap | None:
         """Return the cached pixmap without rendering. ``None`` on miss.
 
