@@ -8,7 +8,7 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 Under active development. Milestone 1 (Reader Core) is the current focus; see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full 15-PR roadmap.
 
-**What works today (through PR 7):**
+**What works today (through PR 8):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
@@ -23,8 +23,11 @@ Under active development. Milestone 1 (Reader Core) is the current focus; see [`
 - Project-relative logging when running from source; OS-standard app-data location when packaged
 - Text selection with a Hand/Select tool toggle (H / V), drag-rect word selection with blue translucent highlight, Ctrl+C copy, and a right-click context menu for Copy or Extract Selection to File
 - File → Extract menu for whole-document Text and Images extraction, with a page-range dialog; per-hit context snippets now show beside each result in the cross-document search panel
+- Page operations on the current page: rotate (Ctrl+R / Ctrl+Shift+R / 180°), delete (with confirmation), insert blank page after, duplicate, move (Ctrl+Shift+M), and crop (margin dialog in PDF points)
+- Save (Ctrl+S) writes mutations in place; Save As (Ctrl+Shift+S) writes to a new path. Modified tabs show ` *` in the tab title; closing a modified tab prompts Save / Discard / Cancel
+- Edit menu reorganized: Find actions stay at the top; new Edit → Page submenu groups all page operations
 
-**Coming next:** Milestone 1 + 2 are complete. Milestone 3 begins with PR 8 — page operations (rotate, delete, insert, reorder, split, merge, crop, duplicate).
+**Coming next:** Milestone 1 + 2 are complete and Milestone 3 is in progress. PR 8.5 adds cross-document page operations (split, merge, insert pages from another PDF). PR 9 brings the rich Organize Pages UI with drag-to-reorder and a live crop preview.
 
 ## Scope
 
@@ -81,6 +84,11 @@ Then `File > Open` (Ctrl+O) to choose a PDF, or pick one from `File > Open Recen
 | Find | Ctrl+F |
 | Find next | F3 |
 | Find previous | Shift+F3 |
+| Save | Ctrl+S |
+| Save As | Ctrl+Shift+S |
+| Rotate page right | Ctrl+R |
+| Rotate page left | Ctrl+Shift+R |
+| Move page | Ctrl+Shift+M |
 | Copy selected text | Ctrl+C |
 | Hand tool (pan) | H |
 | Select Text tool | V |

@@ -42,6 +42,9 @@ class DocumentView(QWidget):
     zoom_changed = Signal(float)
     view_mode_changed = Signal(ViewMode)
 
+    # Fires whenever the document's modified state flips.
+    modified_changed = Signal(bool)
+
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._path = path
@@ -55,6 +58,10 @@ class DocumentView(QWidget):
         # Per-tab search cursor state.
         self.search_hits: list[SearchHit] = []
         self.current_hit_index: int = -1
+
+        # Modified-state tracking. Adapter holds the truth (is_dirty);
+        # this caches the last seen value so we only emit when it flips.
+        self._last_modified: bool = False
 
         # Proxy PageView signals outward.
         self._page_view.page_changed.connect(self.page_changed)
@@ -89,6 +96,9 @@ class DocumentView(QWidget):
         self._outline_panel.set_outline([])
         self._adapter.close()
         self._page_cache.clear()
+        if self._last_modified:
+            self._last_modified = False
+            self.modified_changed.emit(False)
 
     @property
     def path(self) -> Path:
@@ -113,3 +123,82 @@ class DocumentView(QWidget):
     @property
     def search_service(self) -> SearchService:
         return self._search_service
+
+    # ---- Modified-state API ----------------------------------------------
+
+    @property
+    def is_modified(self) -> bool:
+        """True when the document has unsaved page-level mutations."""
+        return self._adapter.is_dirty
+
+    def _refresh_modified(self) -> None:
+        """Re-read the adapter dirty flag; emit if it flipped."""
+        now = self._adapter.is_dirty
+        if now != self._last_modified:
+            self._last_modified = now
+            self.modified_changed.emit(now)
+
+    # ---- Page operations -------------------------------------------------
+    # All mutations route through here so the modified flag stays in sync
+    # and (eventually) so an undo command stack has a single insertion
+    # point. UI code (MainWindow, Organize panel) MUST go through these
+    # methods rather than touching the adapter directly.
+
+    def rotate_page(self, index: int, degrees: int) -> None:
+        self._adapter.rotate_page(index, degrees)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def delete_pages(self, indices: list[int]) -> None:
+        self._adapter.delete_pages(indices)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def insert_blank_page(self, index: int, width: float, height: float) -> None:
+        self._adapter.insert_blank_page(index, width, height)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def duplicate_page(self, index: int) -> None:
+        self._adapter.duplicate_page(index)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def move_page(self, from_index: int, to_index: int) -> None:
+        self._adapter.move_page(from_index, to_index)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def crop_page(
+        self,
+        index: int,
+        margins: tuple[float, float, float, float],
+    ) -> None:
+        self._adapter.crop_page(index, margins)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    # ---- Save ------------------------------------------------------------
+
+    def save(self) -> None:
+        """Save in-place to the path the document was opened from."""
+        self._adapter.save()
+        self._refresh_modified()
+
+    def save_as(self, path: Path) -> None:
+        """Save to a new path; subsequent in-place saves go to this path."""
+        self._adapter.save(path)
+        self._path = path
+        self._refresh_modified()

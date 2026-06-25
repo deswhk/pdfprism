@@ -116,3 +116,98 @@ class DocumentAdapter(Protocol):
             PageOutOfRangeError: if ``index`` is outside the document range.
         """
         ...
+
+    @property
+    def is_dirty(self) -> bool:
+        """True when the open document has unsaved mutations.
+
+        Reset to False by ``save``, set to True by any mutation method.
+        """
+        ...
+
+    def rotate_page(self, index: int, degrees: int) -> None:
+        """Rotate the page at ``index`` by 90, 180, or 270 degrees clockwise.
+
+        Rotation is additive to the page's existing rotation; calling
+        with 90 twice yields 180.
+
+        Raises:
+            PageOutOfRangeError: if ``index`` is outside the document range.
+            PageOperationError: if ``degrees`` is not 90, 180, or 270.
+        """
+        ...
+
+    def delete_pages(self, indices: list[int]) -> None:
+        """Delete the pages at the given 0-based indices.
+
+        Indices may be in any order; duplicates are deduplicated. The
+        adapter sorts and applies deletions in reverse order so earlier
+        indices remain valid during the operation.
+
+        Raises:
+            PageOutOfRangeError: if any index is outside the document range.
+            PageOperationError: if the deletion would leave an empty document.
+        """
+        ...
+
+    def insert_blank_page(self, index: int, width: float, height: float) -> None:
+        """Insert a blank page **before** ``index``.
+
+        Use ``index = page_count`` to append at the end. ``width`` and
+        ``height`` are in PDF points (1/72 inch).
+
+        Raises:
+            PageOutOfRangeError: if ``index`` is not in [0, page_count].
+            PageOperationError: if width or height is not positive.
+        """
+        ...
+
+    def duplicate_page(self, index: int) -> None:
+        """Duplicate the page at ``index``; the copy is inserted right after.
+
+        Raises:
+            PageOutOfRangeError: if ``index`` is outside the document range.
+        """
+        ...
+
+    def move_page(self, from_index: int, to_index: int) -> None:
+        """Move the page at ``from_index`` to ``to_index``.
+
+        ``to_index`` is interpreted in the **post-removal** coordinate
+        space: after the page is removed, it's reinserted before the page
+        currently at ``to_index``. ``to_index == page_count - 1`` after
+        removal moves the page to the end.
+
+        Raises:
+            PageOutOfRangeError: if either index is invalid.
+        """
+        ...
+
+    def crop_page(
+        self,
+        index: int,
+        margins: tuple[float, float, float, float],
+    ) -> None:
+        """Crop the page at ``index`` by the given margins.
+
+        Margins are ``(top, right, bottom, left)`` in PDF points,
+        each subtracted from the corresponding edge of the page's mediabox.
+        Use ``(0, 0, 0, 0)`` to clear an existing crop.
+
+        Raises:
+            PageOutOfRangeError: if ``index`` is outside the document range.
+            PageOperationError: if margins would yield a zero/negative area.
+        """
+        ...
+
+    def save(self, path: Path | None = None) -> None:
+        """Write the current document state to disk.
+
+        ``path`` defaults to the path the document was opened from
+        (in-place save). After a successful save, ``is_dirty`` becomes
+        False.
+
+        Raises:
+            DocumentSaveError: if the write fails for any reason.
+        """
+        ...

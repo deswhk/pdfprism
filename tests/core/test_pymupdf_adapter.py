@@ -9,6 +9,7 @@ from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.document import DocumentAdapter
 from pdfprism.core.exceptions import (
     DocumentOpenError,
+    PageOperationError,
     PageOutOfRangeError,
 )
 from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo, SearchHit
@@ -27,6 +28,13 @@ def adapter() -> Iterator[PyMuPDFAdapter]:
 @pytest.fixture
 def opened_adapter(adapter: PyMuPDFAdapter, sample_pdf_path: Path) -> PyMuPDFAdapter:
     adapter.open(sample_pdf_path)
+    return adapter
+
+
+@pytest.fixture
+def mutable_adapter(adapter: PyMuPDFAdapter, mutable_pdf_path: Path) -> PyMuPDFAdapter:
+    """Adapter opened on a writable copy of sample.pdf for mutation tests."""
+    adapter.open(mutable_pdf_path)
     return adapter
 
 
@@ -303,3 +311,219 @@ class TestExtractImages:
     def test_out_of_range_raises(self, opened_adapter: PyMuPDFAdapter) -> None:
         with pytest.raises(PageOutOfRangeError):
             opened_adapter.extract_images(opened_adapter.page_count)
+
+
+class TestIsDirty:
+    def test_initially_not_dirty(self, opened_adapter: PyMuPDFAdapter) -> None:
+        assert opened_adapter.is_dirty is False
+
+    def test_dirty_after_rotate(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        mutable_adapter.rotate_page(0, 90)
+        assert mutable_adapter.is_dirty is True
+
+    def test_dirty_resets_after_save(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        mutable_adapter.rotate_page(0, 90)
+        mutable_adapter.save()
+        assert mutable_adapter.is_dirty is False
+
+    def test_close_resets_dirty(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        mutable_adapter.rotate_page(0, 90)
+        assert mutable_adapter.is_dirty is True
+        mutable_adapter.close()
+        assert mutable_adapter.is_dirty is False
+
+
+class TestRotatePage:
+    def test_rotation_applied(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        # sample.pdf page 0 starts at rotation 0
+        before = mutable_adapter.get_page_info(0).rotation
+        mutable_adapter.rotate_page(0, 90)
+        after = mutable_adapter.get_page_info(0).rotation
+        assert (after - before) % 360 == 90
+
+    def test_rotation_is_additive(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        before = mutable_adapter.get_page_info(0).rotation
+        mutable_adapter.rotate_page(0, 90)
+        mutable_adapter.rotate_page(0, 90)
+        after = mutable_adapter.get_page_info(0).rotation
+        assert (after - before) % 360 == 180
+
+    def test_invalid_degrees_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOperationError, match="90, 180, or 270"):
+            mutable_adapter.rotate_page(0, 45)
+
+    def test_out_of_range_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            mutable_adapter.rotate_page(99, 90)
+
+
+class TestDeletePages:
+    def test_single_index(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        before = mutable_adapter.page_count
+        mutable_adapter.delete_pages([0])
+        assert mutable_adapter.page_count == before - 1
+
+    def test_multiple_indices_in_any_order(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        before = mutable_adapter.page_count
+        # Deliberately out-of-order with a duplicate
+        mutable_adapter.delete_pages([2, 0, 0])
+        assert mutable_adapter.page_count == before - 2
+
+    def test_empty_list_is_noop(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        before = mutable_adapter.page_count
+        mutable_adapter.delete_pages([])
+        assert mutable_adapter.page_count == before
+        assert mutable_adapter.is_dirty is False
+
+    def test_delete_all_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        all_indices = list(range(mutable_adapter.page_count))
+        with pytest.raises(PageOperationError, match="every page"):
+            mutable_adapter.delete_pages(all_indices)
+
+    def test_out_of_range_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            mutable_adapter.delete_pages([0, 99])
+
+
+class TestInsertBlankPage:
+    def test_insert_at_zero_prepends(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        before = mutable_adapter.page_count
+        mutable_adapter.insert_blank_page(0, 100, 100)
+        assert mutable_adapter.page_count == before + 1
+
+    def test_insert_at_end_appends(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        before = mutable_adapter.page_count
+        mutable_adapter.insert_blank_page(before, 100, 100)
+        assert mutable_adapter.page_count == before + 1
+        last = mutable_adapter.get_page_info(before)
+        assert last.width_points == 100
+        assert last.height_points == 100
+
+    def test_out_of_range_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            mutable_adapter.insert_blank_page(99, 100, 100)
+
+    def test_non_positive_dimensions_raise(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOperationError, match="positive"):
+            mutable_adapter.insert_blank_page(0, 0, 100)
+        with pytest.raises(PageOperationError, match="positive"):
+            mutable_adapter.insert_blank_page(0, 100, -1)
+
+
+class TestDuplicatePage:
+    def test_duplicate_increments_page_count(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        before = mutable_adapter.page_count
+        mutable_adapter.duplicate_page(0)
+        assert mutable_adapter.page_count == before + 1
+
+    def test_duplicate_preserves_text_content(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        original_text = mutable_adapter.extract_text(0)
+        mutable_adapter.duplicate_page(0)
+        copy_text = mutable_adapter.extract_text(1)
+        assert copy_text == original_text
+
+    def test_out_of_range_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            mutable_adapter.duplicate_page(99)
+
+
+class TestMovePage:
+    def test_forward_move_to_end(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        t0 = mutable_adapter.extract_text(0)
+        last = mutable_adapter.page_count - 1
+        mutable_adapter.move_page(0, last)
+        assert mutable_adapter.extract_text(last) == t0
+
+    def test_backward_move_to_start(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        last = mutable_adapter.page_count - 1
+        t_last = mutable_adapter.extract_text(last)
+        mutable_adapter.move_page(last, 0)
+        assert mutable_adapter.extract_text(0) == t_last
+
+    def test_same_index_noop(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        mutable_adapter.move_page(0, 0)
+        assert mutable_adapter.is_dirty is False
+
+    def test_from_out_of_range_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError, match="From"):
+            mutable_adapter.move_page(99, 0)
+
+    def test_to_out_of_range_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError, match="To"):
+            mutable_adapter.move_page(0, 99)
+
+
+class TestCropPage:
+    def test_crop_shrinks_cropbox(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        info = mutable_adapter.get_page_info(0)
+        mutable_adapter.crop_page(0, (10, 20, 10, 20))
+        page = mutable_adapter._doc[0]
+        cb = page.cropbox
+        # Width should be original - left - right
+        assert abs((cb.x1 - cb.x0) - (info.width_points - 40)) < 0.01
+        # Height should be original - top - bottom
+        assert abs((cb.y1 - cb.y0) - (info.height_points - 20)) < 0.01
+
+    def test_zero_margins_full_page(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        info = mutable_adapter.get_page_info(0)
+        mutable_adapter.crop_page(0, (0, 0, 0, 0))
+        page = mutable_adapter._doc[0]
+        cb = page.cropbox
+        assert abs((cb.x1 - cb.x0) - info.width_points) < 0.01
+        assert abs((cb.y1 - cb.y0) - info.height_points) < 0.01
+
+    def test_negative_margins_raise(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOperationError, match="non-negative"):
+            mutable_adapter.crop_page(0, (-1, 0, 0, 0))
+
+    def test_excessive_margins_raise(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        info = mutable_adapter.get_page_info(0)
+        too_wide = info.width_points
+        with pytest.raises(PageOperationError, match="zero or negative"):
+            mutable_adapter.crop_page(0, (0, too_wide, 0, 0))
+
+    def test_out_of_range_raises(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            mutable_adapter.crop_page(99, (0, 0, 0, 0))
+
+
+class TestSave:
+    def test_save_resets_dirty(self, mutable_adapter: PyMuPDFAdapter) -> None:
+        mutable_adapter.rotate_page(0, 90)
+        mutable_adapter.save()
+        assert mutable_adapter.is_dirty is False
+
+    def test_save_persists_mutations(
+        self, mutable_adapter: PyMuPDFAdapter, mutable_pdf_path: Path
+    ) -> None:
+        before_pages = mutable_adapter.page_count
+        mutable_adapter.duplicate_page(0)
+        mutable_adapter.save()
+        mutable_adapter.close()
+        # Reopen and check
+        verifier = type(mutable_adapter)()
+        verifier.open(mutable_pdf_path)
+        try:
+            assert verifier.page_count == before_pages + 1
+        finally:
+            verifier.close()
+
+    def test_save_as_writes_new_path(
+        self,
+        mutable_adapter: PyMuPDFAdapter,
+        tmp_path: Path,
+    ) -> None:
+        new_path = tmp_path / "copy.pdf"
+        mutable_adapter.rotate_page(0, 90)
+        mutable_adapter.save(new_path)
+        assert new_path.exists()
+        assert mutable_adapter.is_dirty is False
+
+    def test_save_without_path_when_never_opened_raises(self) -> None:
+        from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
+
+        a = PyMuPDFAdapter()
+        # Cannot save without opening (no path tracked yet, and require_open
+        # will trigger before the path check).
+        with pytest.raises(Exception):  # noqa: B017,PT011 - either subclass is fine
+            a.save()

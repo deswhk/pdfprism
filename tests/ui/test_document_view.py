@@ -16,6 +16,15 @@ def document_view(sample_pdf_path: Path, qtbot) -> DocumentView:
     return dv
 
 
+@pytest.fixture
+def mutable_view(mutable_pdf_path: Path, qtbot) -> DocumentView:
+    """DocumentView opened on a writable copy of the sample PDF."""
+    dv = DocumentView(mutable_pdf_path)
+    qtbot.addWidget(dv)
+    dv.open()
+    return dv
+
+
 class TestConstruction:
     def test_path_stored(self, sample_pdf_path: Path, qtbot) -> None:
         dv = DocumentView(sample_pdf_path)
@@ -73,3 +82,95 @@ class TestSignals:
         with qtbot.waitSignal(document_view.view_mode_changed, timeout=1000) as blocker:
             document_view.page_view.set_view_mode(ViewMode.CONTINUOUS)
         assert blocker.args == [ViewMode.CONTINUOUS]
+
+
+class TestModifiedState:
+    def test_not_modified_after_open(self, mutable_view: DocumentView) -> None:
+        assert mutable_view.is_modified is False
+
+    def test_modified_after_rotate(self, mutable_view: DocumentView) -> None:
+        mutable_view.rotate_page(0, 90)
+        assert mutable_view.is_modified is True
+
+    def test_modified_changed_signal_emits_true(self, mutable_view: DocumentView, qtbot) -> None:
+        with qtbot.waitSignal(mutable_view.modified_changed, timeout=500) as blocker:
+            mutable_view.rotate_page(0, 90)
+        assert blocker.args == [True]
+
+    def test_modified_changed_emits_false_after_save(
+        self, mutable_view: DocumentView, qtbot
+    ) -> None:
+        mutable_view.rotate_page(0, 90)
+        with qtbot.waitSignal(mutable_view.modified_changed, timeout=500) as blocker:
+            mutable_view.save()
+        assert blocker.args == [False]
+
+    def test_modified_does_not_re_fire_for_same_state(self, mutable_view: DocumentView) -> None:
+        events: list[bool] = []
+        mutable_view.modified_changed.connect(events.append)
+        mutable_view.rotate_page(0, 90)
+        mutable_view.rotate_page(0, 90)  # still dirty
+        # Only one True event; the second rotate doesn't re-fire.
+        assert events == [True]
+
+
+class TestPageOpsRouteThroughDocumentView:
+    def test_rotate_page_updates_adapter(self, mutable_view: DocumentView) -> None:
+        before = mutable_view.adapter.get_page_info(0).rotation
+        mutable_view.rotate_page(0, 90)
+        after = mutable_view.adapter.get_page_info(0).rotation
+        assert (after - before) % 360 == 90
+
+    def test_delete_pages_updates_count(self, mutable_view: DocumentView) -> None:
+        before = mutable_view.page_view.page_count
+        mutable_view.delete_pages([0])
+        assert mutable_view.page_view.page_count == before - 1
+
+    def test_insert_blank_page_updates_count(self, mutable_view: DocumentView) -> None:
+        before = mutable_view.page_view.page_count
+        mutable_view.insert_blank_page(0, 100, 100)
+        assert mutable_view.page_view.page_count == before + 1
+
+    def test_duplicate_page_updates_count(self, mutable_view: DocumentView) -> None:
+        before = mutable_view.page_view.page_count
+        mutable_view.duplicate_page(0)
+        assert mutable_view.page_view.page_count == before + 1
+
+    def test_move_page_changes_order(self, mutable_view: DocumentView) -> None:
+        t0 = mutable_view.adapter.extract_text(0)
+        last = mutable_view.page_view.page_count - 1
+        mutable_view.move_page(0, last)
+        assert mutable_view.adapter.extract_text(last) == t0
+
+    def test_crop_page_shrinks_cropbox(self, mutable_view: DocumentView) -> None:
+        info = mutable_view.adapter.get_page_info(0)
+        mutable_view.crop_page(0, (5, 5, 5, 5))
+        cb = mutable_view.adapter._doc[0].cropbox
+        assert abs((cb.x1 - cb.x0) - (info.width_points - 10)) < 0.01
+
+
+class TestDocumentViewSave:
+    def test_save_persists_and_clears_dirty(
+        self, mutable_view: DocumentView, mutable_pdf_path: Path
+    ) -> None:
+        mutable_view.duplicate_page(0)
+        mutable_view.save()
+        assert mutable_view.is_modified is False
+        # Verify the file change persisted: reopen and check page count.
+        mutable_view.close_document()
+        from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
+
+        verifier = PyMuPDFAdapter()
+        verifier.open(mutable_pdf_path)
+        try:
+            assert verifier.page_count == 4  # was 3
+        finally:
+            verifier.close()
+
+    def test_save_as_updates_path(self, mutable_view: DocumentView, tmp_path: Path) -> None:
+        new_path = tmp_path / "copy.pdf"
+        mutable_view.rotate_page(0, 90)
+        mutable_view.save_as(new_path)
+        assert mutable_view.path == new_path
+        assert new_path.exists()
+        assert mutable_view.is_modified is False

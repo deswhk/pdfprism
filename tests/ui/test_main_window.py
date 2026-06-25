@@ -20,6 +20,21 @@ def _isolate_qsettings(tmp_path: Path):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _auto_discard_unsaved_prompts(monkeypatch):
+    """Auto-resolve QMessageBox.question with Discard so test teardown
+    does not hang on the unsaved-changes prompt that PR 8's closeEvent
+    fires for modified tabs. Tests that need to assert against the
+    prompt (TestCloseTabPrompt) re-monkeypatch within the test body,
+    which takes precedence over this autouse default.
+    """
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **kw: QMessageBox.StandardButton.Discard,
+    )
+
+
 @pytest.fixture
 def main_window(qtbot) -> MainWindow:
     mw = MainWindow()
@@ -509,3 +524,220 @@ class TestToolModePersistence:
         for i in range(main_window._tab_widget.count()):
             tab = main_window._tab_widget.widget(i)
             assert tab.page_view.tool_mode == ToolMode.SELECT
+
+
+class TestSaveActions:
+    def test_save_disabled_with_no_tab(self, main_window: MainWindow) -> None:
+        assert main_window.act_save.isEnabled() is False
+        assert main_window.act_save_as.isEnabled() is False
+
+    def test_save_disabled_when_clean(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        assert main_window.act_save.isEnabled() is False
+        assert main_window.act_save_as.isEnabled() is True
+
+    def test_save_enabled_when_dirty(self, main_window: MainWindow, mutable_pdf_path: Path) -> None:
+        main_window._open_path(mutable_pdf_path)
+        main_window._active_tab.rotate_page(0, 90)
+        assert main_window.act_save.isEnabled() is True
+
+    def test_save_clears_dirty(self, main_window: MainWindow, mutable_pdf_path: Path) -> None:
+        main_window._open_path(mutable_pdf_path)
+        main_window._active_tab.rotate_page(0, 90)
+        main_window._on_save()
+        assert main_window._active_tab.is_modified is False
+        assert main_window.act_save.isEnabled() is False
+
+    def test_save_as_writes_new_file(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        new_path = tmp_path / "saved.pdf"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: (str(new_path), ""),
+        )
+        main_window._open_path(mutable_pdf_path)
+        main_window._active_tab.rotate_page(0, 90)
+        main_window._on_save_as()
+        assert new_path.exists()
+        assert main_window._active_tab.path == new_path
+        # Tab title updated to new filename
+        assert main_window._tab_widget.tabText(0) == "saved.pdf"
+
+
+class TestPageOpActions:
+    def test_actions_disabled_with_no_tab(self, main_window: MainWindow) -> None:
+        assert main_window.act_rotate_right.isEnabled() is False
+        assert main_window.act_delete_page.isEnabled() is False
+        assert main_window.act_crop_page.isEnabled() is False
+
+    def test_actions_enabled_with_tab(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        assert main_window.act_rotate_right.isEnabled() is True
+        assert main_window.act_delete_page.isEnabled() is True
+        assert main_window.act_crop_page.isEnabled() is True
+
+    def test_rotate_right_mutates(self, main_window: MainWindow, mutable_pdf_path: Path) -> None:
+        main_window._open_path(mutable_pdf_path)
+        before = main_window._active_tab.adapter.get_page_info(0).rotation
+        main_window._on_rotate_right()
+        after = main_window._active_tab.adapter.get_page_info(0).rotation
+        assert (after - before) % 360 == 90
+
+    def test_duplicate_increments_pages(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        before = main_window._active_tab.page_view.page_count
+        main_window._on_duplicate_page()
+        assert main_window._active_tab.page_view.page_count == before + 1
+
+    def test_insert_blank_increments_pages(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        before = main_window._active_tab.page_view.page_count
+        main_window._on_insert_blank()
+        assert main_window._active_tab.page_view.page_count == before + 1
+
+    def test_delete_page_with_confirm(
+        self, main_window: MainWindow, mutable_pdf_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: QMessageBox.StandardButton.Yes,
+        )
+        main_window._open_path(mutable_pdf_path)
+        before = main_window._active_tab.page_view.page_count
+        main_window._on_delete_page()
+        assert main_window._active_tab.page_view.page_count == before - 1
+
+    def test_delete_page_declined_keeps_pages(
+        self, main_window: MainWindow, mutable_pdf_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: QMessageBox.StandardButton.No,
+        )
+        main_window._open_path(mutable_pdf_path)
+        before = main_window._active_tab.page_view.page_count
+        main_window._on_delete_page()
+        assert main_window._active_tab.page_view.page_count == before
+
+    def test_move_page_via_dialog(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        main_window._open_path(mutable_pdf_path)
+        # Move page 1 to position 3 (1-based)
+        monkeypatch.setattr(
+            QInputDialog,
+            "getInt",
+            lambda *a, **kw: (3, True),
+        )
+        t0 = main_window._active_tab.adapter.extract_text(0)
+        main_window._on_move_page()
+        # After move, P0's text should be at index 2 (3 - 1)
+        assert main_window._active_tab.adapter.extract_text(2) == t0
+
+
+class TestModifiedTabTitle:
+    def test_title_shows_star_when_modified(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        main_window._active_tab.rotate_page(0, 90)
+        assert main_window._tab_widget.tabText(0) == "mutable.pdf *"
+
+    def test_title_drops_star_after_save(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        main_window._active_tab.rotate_page(0, 90)
+        main_window._on_save()
+        assert main_window._tab_widget.tabText(0) == "mutable.pdf"
+
+
+class TestCloseTabPrompt:
+    def test_close_clean_tab_no_prompt(
+        self, main_window: MainWindow, mutable_pdf_path: Path, monkeypatch
+    ) -> None:
+        # If we call this and the prompt fires unexpectedly, the test will
+        # hang on the modal. So we install a sentinel that records the call.
+        prompted: list[object] = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: (prompted.append(1), QMessageBox.StandardButton.Cancel)[1],
+        )
+        main_window._open_path(mutable_pdf_path)
+        main_window._on_close_tab()
+        assert prompted == []  # never prompted for clean tab
+        assert main_window._tab_widget.count() == 0
+
+    def test_cancel_keeps_tab(
+        self, main_window: MainWindow, mutable_pdf_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: QMessageBox.StandardButton.Cancel,
+        )
+        main_window._open_path(mutable_pdf_path)
+        main_window._active_tab.rotate_page(0, 90)
+        main_window._on_close_tab()
+        assert main_window._tab_widget.count() == 1
+
+    def test_discard_closes_tab(
+        self, main_window: MainWindow, mutable_pdf_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: QMessageBox.StandardButton.Discard,
+        )
+        main_window._open_path(mutable_pdf_path)
+        main_window._active_tab.rotate_page(0, 90)
+        main_window._on_close_tab()
+        assert main_window._tab_widget.count() == 0
+
+    def test_save_closes_tab_and_saves(
+        self, main_window: MainWindow, mutable_pdf_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: QMessageBox.StandardButton.Save,
+        )
+        main_window._open_path(mutable_pdf_path)
+        # Apply a mutation that increases page count, so we can verify the
+        # saved file shows the new page count after close.
+        main_window._active_tab.duplicate_page(0)
+        main_window._on_close_tab()
+        assert main_window._tab_widget.count() == 0
+        # Reopen the file and confirm the mutation persisted.
+        from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
+
+        verifier = PyMuPDFAdapter()
+        verifier.open(mutable_pdf_path)
+        try:
+            assert verifier.page_count == 4
+        finally:
+            verifier.close()
