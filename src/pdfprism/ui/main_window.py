@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDockWidget,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -25,6 +26,7 @@ from pdfprism.core.exceptions import PdfPrismError
 from pdfprism.core.types import CrossDocHit
 from pdfprism.services.extract import ExtractService
 from pdfprism.services.search import SearchScope, SearchService
+from pdfprism.ui.dialogs.crop import CropDialog
 from pdfprism.ui.dialogs.extract import ExtractDialog, ExtractKind
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
 from pdfprism.ui.theme import DARK_QSS
@@ -139,6 +141,7 @@ class MainWindow(QMainWindow):
         self._update_recent_menu()
         self._update_status_bar()
         self._update_actions_enabled()
+        self._refresh_save_actions()
 
     @staticmethod
     def _make_dock(title: str, widget: QWidget) -> QDockWidget:
@@ -157,6 +160,16 @@ class MainWindow(QMainWindow):
         self.act_open = QAction("&Open...", self)
         self.act_open.setShortcut(QKeySequence.StandardKey.Open)
         self.act_open.triggered.connect(self._on_open)
+
+        self.act_save = QAction("&Save", self)
+        self.act_save.setShortcut(QKeySequence.StandardKey.Save)
+        self.act_save.triggered.connect(self._on_save)
+        self.act_save.setEnabled(False)
+
+        self.act_save_as = QAction("Save &As...", self)
+        self.act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
+        self.act_save_as.triggered.connect(self._on_save_as)
+        self.act_save_as.setEnabled(False)
 
         self.act_close_doc = QAction("&Close Tab", self)
         self.act_close_doc.setShortcut(QKeySequence.StandardKey.Close)
@@ -252,6 +265,44 @@ class MainWindow(QMainWindow):
         self.act_extract_text = QAction("Extract &Text...", self)
         self.act_extract_text.triggered.connect(self._on_extract_text)
 
+        # Page operations (PR 8). All act on the current page in the
+        # active tab; route through DocumentView so the modified flag
+        # updates and the page/thumbnail UI rebuilds.
+        self.act_rotate_right = QAction("Rotate &Right (90°)", self)
+        self.act_rotate_right.setShortcut(QKeySequence("Ctrl+R"))
+        self.act_rotate_right.triggered.connect(self._on_rotate_right)
+        self.act_rotate_right.setEnabled(False)
+
+        self.act_rotate_left = QAction("Rotate &Left (90°)", self)
+        self.act_rotate_left.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self.act_rotate_left.triggered.connect(self._on_rotate_left)
+        self.act_rotate_left.setEnabled(False)
+
+        self.act_rotate_180 = QAction("Rotate 180°", self)
+        self.act_rotate_180.triggered.connect(self._on_rotate_180)
+        self.act_rotate_180.setEnabled(False)
+
+        self.act_delete_page = QAction("&Delete Current Page", self)
+        self.act_delete_page.triggered.connect(self._on_delete_page)
+        self.act_delete_page.setEnabled(False)
+
+        self.act_insert_blank = QAction("&Insert Blank Page After", self)
+        self.act_insert_blank.triggered.connect(self._on_insert_blank)
+        self.act_insert_blank.setEnabled(False)
+
+        self.act_duplicate_page = QAction("D&uplicate Current Page", self)
+        self.act_duplicate_page.triggered.connect(self._on_duplicate_page)
+        self.act_duplicate_page.setEnabled(False)
+
+        self.act_move_page = QAction("&Move Page...", self)
+        self.act_move_page.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        self.act_move_page.triggered.connect(self._on_move_page)
+        self.act_move_page.setEnabled(False)
+
+        self.act_crop_page = QAction("&Crop Page...", self)
+        self.act_crop_page.triggered.connect(self._on_crop_page)
+        self.act_crop_page.setEnabled(False)
+
         self.act_extract_images = QAction("Extract &Images...", self)
         self.act_extract_images.triggered.connect(self._on_extract_images)
 
@@ -290,6 +341,8 @@ class MainWindow(QMainWindow):
 
         for action in [
             self.act_open,
+            self.act_save,
+            self.act_save_as,
             self.act_close_doc,
             self.act_quit,
             self.act_find,
@@ -311,6 +364,14 @@ class MainWindow(QMainWindow):
             self.act_copy,
             self.act_extract_text,
             self.act_extract_images,
+            self.act_rotate_right,
+            self.act_rotate_left,
+            self.act_rotate_180,
+            self.act_delete_page,
+            self.act_insert_blank,
+            self.act_duplicate_page,
+            self.act_move_page,
+            self.act_crop_page,
             self.act_fit_page,
             self.act_fit_width,
             self.act_actual_size,
@@ -327,6 +388,10 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.act_open)
         self._recent_menu = file_menu.addMenu("Open &Recent")
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_save)
+        file_menu.addAction(self.act_save_as)
+        file_menu.addSeparator()
         file_menu.addAction(self.act_close_doc)
         extract_menu = file_menu.addMenu("&Extract")
         extract_menu.addAction(self.act_extract_text)
@@ -338,6 +403,18 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.act_find)
         edit_menu.addAction(self.act_find_next)
         edit_menu.addAction(self.act_find_prev)
+        edit_menu.addSeparator()
+        page_menu = edit_menu.addMenu("&Page")
+        page_menu.addAction(self.act_rotate_right)
+        page_menu.addAction(self.act_rotate_left)
+        page_menu.addAction(self.act_rotate_180)
+        page_menu.addSeparator()
+        page_menu.addAction(self.act_insert_blank)
+        page_menu.addAction(self.act_duplicate_page)
+        page_menu.addAction(self.act_move_page)
+        page_menu.addAction(self.act_crop_page)
+        page_menu.addSeparator()
+        page_menu.addAction(self.act_delete_page)
 
         view_menu = menubar.addMenu("&View")
         view_menu.addAction(self.act_single_page)
@@ -400,11 +477,16 @@ class MainWindow(QMainWindow):
         self._outline_stack.addWidget(doc_view.outline_panel)
         tab_idx = self._tab_widget.addTab(doc_view, doc_view.path.name)
         self._tab_widget.setTabToolTip(tab_idx, str(doc_view.path))
+        doc_view.modified_changed.connect(
+            lambda modified, dv=doc_view: self._on_tab_modified_changed(dv, modified)
+        )
         return tab_idx
 
     def _on_tab_close_requested(self, index: int) -> None:
         doc_view = self._tab_widget.widget(index)
         if not isinstance(doc_view, DocumentView):
+            return
+        if doc_view.is_modified and not self._prompt_unsaved_changes(doc_view):
             return
         # Cross-search results index tabs by position; removing a tab
         # invalidates those indices, so drop the result set rather than
@@ -459,6 +541,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"pdfprism - {doc_view.path.name}")
         self._update_status_bar()
         self._update_actions_enabled()
+        self._refresh_save_actions()
         # Closing the search toolbar on tab switch is right for single-doc
         # search (each tab has its own state). For cross-search the result
         # set spans tabs, so skip the close when cross-search is active --
@@ -477,7 +560,9 @@ class MainWindow(QMainWindow):
             self._on_close_search()
         self._clear_cross_search()
         self._update_status_bar()
+        self._refresh_save_actions()
         self._update_actions_enabled()
+        self._refresh_save_actions()
 
     def _on_next_tab(self) -> None:
         if self._tab_widget.count() <= 1:
@@ -748,6 +833,7 @@ class MainWindow(QMainWindow):
     def _on_page_changed(self, index: int) -> None:
         self._update_status_bar()
         self._update_actions_enabled()
+        self._refresh_save_actions()
 
     def _on_zoom_changed(self, _ratio: float) -> None:
         self._update_status_bar()
@@ -1070,6 +1156,12 @@ class MainWindow(QMainWindow):
         self._recent_menu.addAction(clear_action)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        for i in range(self._tab_widget.count()):
+            doc_view = self._tab_widget.widget(i)
+            if isinstance(doc_view, DocumentView) and doc_view.is_modified:
+                if not self._prompt_unsaved_changes(doc_view):
+                    event.ignore()
+                    return
         try:
             for i in range(self._tab_widget.count()):
                 doc_view = self._tab_widget.widget(i)
@@ -1077,3 +1169,239 @@ class MainWindow(QMainWindow):
                     doc_view.close_document()
         finally:
             super().closeEvent(event)
+
+    # ----- save / modified-tracking slots -----
+
+    def _on_save(self) -> None:
+        if self._active_tab is None:
+            return
+        if not self._active_tab.is_modified:
+            return
+        try:
+            self._active_tab.save()
+        except Exception as exc:  # noqa: BLE001 - surfaced to user
+            QMessageBox.critical(self, "Save Failed", str(exc))
+            return
+        self._refresh_save_actions()
+
+    def _on_save_as(self) -> None:
+        if self._active_tab is None:
+            return
+        settings = QSettings()
+        last_dir = settings.value("recent/last_dir", "", type=str)
+        # Suggest <stem> (copy).pdf as a default to avoid clobbering.
+        suggested = self._active_tab.path.parent / f"{self._active_tab.path.stem} (copy).pdf"
+        start_dir = last_dir or str(suggested)
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save PDF As",
+            start_dir if last_dir else str(suggested),
+            "PDF files (*.pdf);;All files (*)",
+        )
+        if not path_str:
+            return
+        target = Path(path_str)
+        if target.suffix.lower() != ".pdf":
+            target = target.with_suffix(".pdf")
+        try:
+            self._active_tab.save_as(target)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save As Failed", str(exc))
+            return
+        settings.setValue("recent/last_dir", str(target.parent))
+        # Path changed -> update tab title + tooltip.
+        idx = self._tab_widget.indexOf(self._active_tab)
+        if idx >= 0:
+            self._tab_widget.setTabText(idx, target.name)
+            self._tab_widget.setTabToolTip(idx, str(target))
+        self._refresh_save_actions()
+
+    def _on_tab_modified_changed(self, doc_view: DocumentView, modified: bool) -> None:
+        idx = self._tab_widget.indexOf(doc_view)
+        if idx < 0:
+            return
+        base = doc_view.path.name
+        self._tab_widget.setTabText(idx, f"{base} *" if modified else base)
+        if doc_view is self._active_tab:
+            self._refresh_save_actions()
+
+    def _refresh_save_actions(self) -> None:
+        has_tab = self._active_tab is not None
+        self.act_save.setEnabled(has_tab and self._active_tab.is_modified)
+        self.act_save_as.setEnabled(has_tab)
+        # Page operations also enable/disable with active tab.
+        for act in (
+            self.act_rotate_right,
+            self.act_rotate_left,
+            self.act_rotate_180,
+            self.act_delete_page,
+            self.act_insert_blank,
+            self.act_duplicate_page,
+            self.act_move_page,
+            self.act_crop_page,
+        ):
+            act.setEnabled(has_tab)
+
+    def _prompt_unsaved_changes(self, doc_view: DocumentView) -> bool:
+        """Modal prompt for a modified document.
+
+        Returns True if it is safe to proceed (saved, or user chose to
+        discard), False if the user cancelled.
+        """
+        reply = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            f"'{doc_view.path.name}' has unsaved changes. Save before closing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return False
+        if reply == QMessageBox.StandardButton.Save:
+            try:
+                doc_view.save()
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, "Save Failed", str(exc))
+                return False
+        return True
+
+    # ----- page-op slots -----
+
+    def _current_page_index(self) -> int | None:
+        if self._active_tab is None:
+            return None
+        idx = self._active_tab.page_view.current_page
+        if idx < 0 or idx >= self._active_tab.page_view.page_count:
+            return None
+        return idx
+
+    def _run_page_op(self, action_label: str, fn) -> None:
+        """Wrap a page-op call: surface engine errors via QMessageBox."""
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, action_label, str(exc))
+
+    def _on_rotate_right(self) -> None:
+        idx = self._current_page_index()
+        if idx is None:
+            return
+        self._run_page_op(
+            "Rotate Right",
+            lambda: self._active_tab.rotate_page(idx, 90),
+        )
+
+    def _on_rotate_left(self) -> None:
+        idx = self._current_page_index()
+        if idx is None:
+            return
+        self._run_page_op(
+            "Rotate Left",
+            lambda: self._active_tab.rotate_page(idx, 270),
+        )
+
+    def _on_rotate_180(self) -> None:
+        idx = self._current_page_index()
+        if idx is None:
+            return
+        self._run_page_op(
+            "Rotate 180°",
+            lambda: self._active_tab.rotate_page(idx, 180),
+        )
+
+    def _on_delete_page(self) -> None:
+        idx = self._current_page_index()
+        if idx is None:
+            return
+        if self._active_tab.page_view.page_count <= 1:
+            QMessageBox.warning(
+                self,
+                "Cannot Delete",
+                "Cannot delete the only page in the document.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Page",
+            f"Delete page {idx + 1}? This cannot be undone (close without saving to revert).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._run_page_op(
+            "Delete Page",
+            lambda: self._active_tab.delete_pages([idx]),
+        )
+
+    def _on_insert_blank(self) -> None:
+        idx = self._current_page_index()
+        if idx is None:
+            return
+        info = self._active_tab.adapter.get_page_info(idx)
+        self._run_page_op(
+            "Insert Blank Page",
+            lambda: self._active_tab.insert_blank_page(
+                idx + 1, info.width_points, info.height_points
+            ),
+        )
+
+    def _on_duplicate_page(self) -> None:
+        idx = self._current_page_index()
+        if idx is None:
+            return
+        self._run_page_op(
+            "Duplicate Page",
+            lambda: self._active_tab.duplicate_page(idx),
+        )
+
+    def _on_move_page(self) -> None:
+        idx = self._current_page_index()
+        if idx is None:
+            return
+        n = self._active_tab.page_view.page_count
+        if n < 2:
+            QMessageBox.information(
+                self,
+                "Move Page",
+                "Move requires at least 2 pages.",
+            )
+            return
+        target, ok = QInputDialog.getInt(
+            self,
+            "Move Page",
+            f"Move page {idx + 1} to position (1-{n}):",
+            value=idx + 1,
+            minValue=1,
+            maxValue=n,
+        )
+        if not ok:
+            return
+        new_idx = target - 1
+        if new_idx == idx:
+            return
+        self._run_page_op(
+            "Move Page",
+            lambda: self._active_tab.move_page(idx, new_idx),
+        )
+
+    def _on_crop_page(self) -> None:
+        idx = self._current_page_index()
+        if idx is None:
+            return
+        info = self._active_tab.adapter.get_page_info(idx)
+        dlg = CropDialog(
+            page_index=idx,
+            page_width=info.width_points,
+            page_height=info.height_points,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        margins = dlg.margins
+        self._run_page_op(
+            "Crop Page",
+            lambda: self._active_tab.crop_page(idx, margins),
+        )

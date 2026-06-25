@@ -102,7 +102,7 @@ src/pdfprism/
 │   │   ├── search_results_panel.py  # PR 6: cross-doc search results tree
 │   │   ├── thumbnail_panel.py   # QListView thumbnail strip
 │   │   └── outline_panel.py     # QTreeView outline (TOC)
-│   └── dialogs/                 # goto_page; password (PR 10+), merge (PR 9+)
+│   └── dialogs/                 # goto_page; extract (PR 7); crop (PR 8); password (PR 10+), merge (PR 9+)
 ├── config.py                    # App constants (name, org, MAX_RECENT_FILES, etc.)
 ├── logging_config.py            # Stdlib logging setup
 └── app.py                       # Entry point
@@ -569,6 +569,128 @@ and glyph-level is a candidate for a later PR. No selection in
 continuous mode. No click-an-image-to-save; whole-document extract via
 the menu covers the bulk case.
 
+## Page Operations
+
+PR 8 introduces single-document page mutations (rotate, delete, insert,
+duplicate, move/reorder, crop) plus Save / Save As, threaded through
+three layers in a way that mirrors the rest of the architecture: the
+engine work lives on the adapter, semantic naming lives in the service,
+and modified-state tracking + UI plumbing live on `DocumentView`.
+
+**Save model.** Mutations are staged in memory; nothing hits disk until
+the user invokes Save (Ctrl+S) or Save As (Ctrl+Shift+S). This is the
+Acrobat-style staging model: the active tab carries a dirty flag, the
+tab title shows ` *` when modified, and closing a modified tab (or the
+whole app) prompts Save / Discard / Cancel. No undo command stack in
+v1; close-without-save is the coarse-grained undo, which is enough for
+Milestone 3 and aligns with PR 11's needs (redaction is irreversible
+once applied, so staging matters more than per-operation undo).
+
+**Adapter contract.** The `DocumentAdapter` Protocol grew seven
+mutation methods plus an `is_dirty` property and a `save` method:
+
+- `rotate_page(index, degrees)` -- 90, 180, or 270 only (additive to
+  the page's existing rotation).
+- `delete_pages(indices)` -- deduplicated and applied in reverse order
+  so earlier indices remain valid; raises if every page would be
+  deleted.
+- `insert_blank_page(index, width, height)` -- inserts before `index`;
+  use `index = page_count` to append.
+- `duplicate_page(index)` -- inserts the copy right after the source.
+- `move_page(from_index, to_index)` -- `to_index` is the desired
+  **post-removal** index. The PyMuPDF implementation translates this
+  to the engine's "insert before original-coords index" semantics,
+  using the `-1` sentinel for move-to-end. (This was verified
+  empirically against PyMuPDF 1.27.)
+- `crop_page(index, margins)` -- margins are
+  `(top, right, bottom, left)` in PDF points; `(0, 0, 0, 0)` clears
+  any existing crop.
+- `save(path=None)` -- writes the document to disk. Default uses the
+  path the document was opened from (in-place save via a temp file
+  + atomic rename to dodge Windows file-lock issues; close + reopen
+  to keep the adapter usable afterward). A non-`None` path performs
+  Save As and updates the tracked path so subsequent saves stay
+  in-place.
+
+Two new exception types -- `PageOperationError` for invalid mutations
+(bad rotation angle, empty document after delete, negative crop
+margins) and `DocumentSaveError` for I/O failures -- join the existing
+hierarchy under `PdfPrismError`.
+
+**Service layer.** `services/pages.py` is the smallest service in the
+codebase: each operation is a one-liner that delegates to the adapter.
+The layer exists for symmetry with `SearchService` and `ExtractService`,
+to give the operations user-intent names (`rotate_right`, `rotate_left`,
+`append_blank_page`, `insert_blank_page_after`/`_before`), and so future
+composite operations (PR 11 redaction will compose with crop; PR 8.5
+cross-doc page insertion will create temp adapters here) have somewhere
+to live without growing the adapter contract.
+
+**Modified-state tracking on DocumentView.** The adapter holds the
+truth (`is_dirty`), DocumentView caches the last-known value and
+emits `modified_changed(bool)` only when the value flips. Every
+page-op DocumentView exposes (`rotate_page`, `delete_pages`, etc.)
+does the same dance:
+
+1. Mutate the adapter.
+2. Clear `_page_cache` (pixmaps now refer to stale page indices).
+3. Re-bind the **thumbnail panel** to the adapter -- before the page
+   view -- so its model knows the new page count before
+   `PageView.set_adapter` emits `page_changed(0)` which routes
+   through to `ThumbnailPanel.set_current_page` -> `scrollTo` ->
+   `rowCount`/`data`. Getting this order wrong is the kind of bug
+   that only surfaces on delete-last-page (the smoke caught it).
+4. Re-bind the page view (which triggers re-render).
+5. Call `_refresh_modified()` to fire the signal if the dirty state
+   flipped.
+
+All UI code -- MainWindow slots, future Organize panel -- routes
+mutations through DocumentView's methods, never the adapter directly.
+That's the single insertion point an undo command stack would hook
+into in a future PR.
+
+**MainWindow surface.** New actions:
+
+- File menu: Save (Ctrl+S), Save As... (Ctrl+Shift+S). Both are
+  disabled when no tab is open; Save is also disabled when the active
+  tab is clean. `_refresh_save_actions` runs on tab open, tab change,
+  modified-state flip, and empty-state transitions.
+- Edit → Page submenu: Rotate Right (Ctrl+R), Rotate Left
+  (Ctrl+Shift+R), Rotate 180°, Insert Blank Page After, Duplicate
+  Current Page, Move Page... (Ctrl+Shift+M), Crop Page..., Delete
+  Current Page (with confirmation, blocked when only one page
+  remains).
+
+Slots route through `_current_page_index` (returns the active tab's
+current page or `None` for the empty state) and `_run_page_op` (wraps
+the call in a try/except that surfaces engine errors as a critical
+QMessageBox). Insert-blank defaults the new page's dimensions to the
+current page's so the document stays visually consistent. Move uses
+`QInputDialog.getInt` with 1-based UI numbering to match the
+page-navigator convention.
+
+**Crop dialog.** `ui/dialogs/crop.py` `CropDialog` is a modal with
+four `QDoubleSpinBox`es (top/right/bottom/left in PDF points) plus a
+Reset button that zeros all four (used to clear an existing crop).
+Spinbox upper bounds are `dim - 1` so the crop can't collapse the
+page to zero area; the adapter has its own "resulting area must be
+positive" check as a backstop. Unit conversion to inches/mm and a
+live preview are deferred to PR 9, where the Organize panel will
+host a richer crop UI.
+
+**Test fixtures.** Mutation tests need a writable copy of
+`sample.pdf`. `tests/conftest.py` exposes a `mutable_pdf_path`
+fixture that copies the committed sample into the per-test
+`tmp_path`. Adapter tests use a `mutable_adapter` fixture that opens
+the copy; DocumentView tests use `mutable_view`. The committed
+sample is still treated as effectively read-only.
+
+**Deferred to PR 8.5/9.** Cross-document operations (split, merge,
+insert pages from another PDF, extract-to-new-file) live in PR 8.5
+to keep PR 8 reviewable. Rich Organize panel UI (drag-reorder,
+multi-select, live crop preview) is PR 9. Undo command stack is
+deferred -- close-without-save is the v1 undo story.
+
 ## Theme
 
 `pdfprism.ui.theme.DARK_QSS` is a Qt Style Sheet (QSS) string applied
@@ -754,9 +876,23 @@ merges via PR review and CI on green.
 
 ### Milestone 3 — Page Operations
 
-- PR 8: `services/pages.py` — rotate, delete, insert, reorder, crop, extract,
-  split, merge, duplicate.
-- PR 9: "Organize Pages" UI.
+- **PR 8: single-doc page operations.** Adapter mutation contract
+  (`rotate_page`, `delete_pages`, `insert_blank_page`, `duplicate_page`,
+  `move_page`, `crop_page`, `save`) plus `is_dirty` and `save_as`-style
+  path tracking. New `services/pages.py` `PageService` thin-wraps each
+  operation with user-intent naming. `DocumentView` gains `is_modified`,
+  `modified_changed` signal, and proxy methods that route every mutation
+  so the model and UI stay in sync. MainWindow Save (Ctrl+S) / Save As
+  (Ctrl+Shift+S), tab title shows ` *` when modified, close-tab and
+  app-quit prompts (Save / Discard / Cancel) for unsaved changes. Edit
+  → Page submenu: Rotate Right (Ctrl+R), Rotate Left (Ctrl+Shift+R),
+  Rotate 180°, Insert Blank Page After, Duplicate, Move Page...
+  (Ctrl+Shift+M), Crop Page... (new `CropDialog`), Delete Current Page
+  (with confirmation).
+- PR 8.5: cross-document page operations (split, merge, insert pages
+  from another PDF, extract-to-new-file).
+- PR 9: "Organize Pages" UI (drag-reorder, multi-select, live crop
+  preview).
 
 ### Milestone 4 — Security & OCR
 

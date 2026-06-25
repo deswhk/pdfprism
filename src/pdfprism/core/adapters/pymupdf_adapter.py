@@ -7,6 +7,8 @@ import pymupdf
 
 from pdfprism.core.exceptions import (
     DocumentOpenError,
+    DocumentSaveError,
+    PageOperationError,
     PageOutOfRangeError,
     PasswordRequiredError,
 )
@@ -20,6 +22,8 @@ class PyMuPDFAdapter:
 
     def __init__(self) -> None:
         self._doc: pymupdf.Document | None = None
+        self._path: Path | None = None
+        self._is_dirty: bool = False
 
     def open(self, path: Path, password: str | None = None) -> None:
         if not path.exists():
@@ -39,6 +43,8 @@ class PyMuPDFAdapter:
         if self._doc is not None:
             self._doc.close()
         self._doc = doc
+        self._path = path
+        self._is_dirty = False
         logger.info("Opened document: %s (%d pages)", path, doc.page_count)
 
     def close(self) -> None:
@@ -46,6 +52,8 @@ class PyMuPDFAdapter:
             self._doc.close()
             self._doc = None
             logger.info("Closed document")
+        self._path = None
+        self._is_dirty = False
 
     @property
     def page_count(self) -> int:
@@ -240,3 +248,146 @@ class PyMuPDFAdapter:
                 )
             )
         return images
+
+    @property
+    def is_dirty(self) -> bool:
+        return self._is_dirty
+
+    def rotate_page(self, index: int, degrees: int) -> None:
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {index} out of range [0, {self._doc.page_count})"
+            )
+        if degrees not in (90, 180, 270):
+            raise PageOperationError(f"Rotation must be 90, 180, or 270; got {degrees}")
+        page = self._doc[index]
+        page.set_rotation((page.rotation + degrees) % 360)
+        self._is_dirty = True
+
+    def delete_pages(self, indices: list[int]) -> None:
+        self._require_open()
+        assert self._doc is not None
+        unique = sorted(set(indices))
+        if not unique:
+            return
+        for i in unique:
+            if not 0 <= i < self._doc.page_count:
+                raise PageOutOfRangeError(
+                    f"Page index {i} out of range [0, {self._doc.page_count})"
+                )
+        if len(unique) >= self._doc.page_count:
+            raise PageOperationError("Cannot delete every page; document would be empty")
+        for i in reversed(unique):
+            self._doc.delete_page(i)
+        self._is_dirty = True
+
+    def insert_blank_page(self, index: int, width: float, height: float) -> None:
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= index <= self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Insert index {index} out of range [0, {self._doc.page_count}]"
+            )
+        if width <= 0 or height <= 0:
+            raise PageOperationError(f"Page dimensions must be positive; got {width}x{height}")
+        self._doc.new_page(pno=index, width=width, height=height)
+        self._is_dirty = True
+
+    def duplicate_page(self, index: int) -> None:
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {index} out of range [0, {self._doc.page_count})"
+            )
+        # PyMuPDF's fullcopy_page copies the source page to a destination
+        # index; passing the source index + 1 inserts the copy right after.
+        self._doc.fullcopy_page(index, index + 1)
+        self._is_dirty = True
+
+    def move_page(self, from_index: int, to_index: int) -> None:
+        self._require_open()
+        assert self._doc is not None
+        n = self._doc.page_count
+        if not 0 <= from_index < n:
+            raise PageOutOfRangeError(f"From index {from_index} out of range [0, {n})")
+        if not 0 <= to_index < n:
+            raise PageOutOfRangeError(f"To index {to_index} out of range [0, {n})")
+        if from_index == to_index:
+            return
+        # PyMuPDF's Document.move_page(pno, to) semantics, verified
+        # empirically against pymupdf 1.27:
+        #   - to is the *original-coordinate* index to insert before
+        #   - to=-1 means move to the very end
+        #   - move_page(0, 2) on [P0,P1,P2,P3] -> [P1,P0,P2,P3]
+        #     (so post-removal index 1, not 2)
+        #   - move_page(3, 0) on [P0,P1,P2,P3] -> [P3,P0,P1,P2]
+        #     (so post-removal index 0 directly)
+        # Our contract: to_index is the desired post-removal index.
+        # Backward move: pass to_index directly.
+        # Forward move to last index: use -1 sentinel.
+        # Forward move to middle: pass to_index + 1.
+        if from_index > to_index:
+            self._doc.move_page(from_index, to_index)
+        elif to_index == n - 1:
+            self._doc.move_page(from_index, -1)
+        else:
+            self._doc.move_page(from_index, to_index + 1)
+        self._is_dirty = True
+
+    def crop_page(
+        self,
+        index: int,
+        margins: tuple[float, float, float, float],
+    ) -> None:
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {index} out of range [0, {self._doc.page_count})"
+            )
+        top, right, bottom, left = margins
+        if any(m < 0 for m in margins):
+            raise PageOperationError(f"Crop margins must be non-negative; got {margins}")
+        page = self._doc[index]
+        mb = page.mediabox
+        new_rect = pymupdf.Rect(
+            mb.x0 + left,
+            mb.y0 + top,
+            mb.x1 - right,
+            mb.y1 - bottom,
+        )
+        if new_rect.width <= 0 or new_rect.height <= 0:
+            raise PageOperationError(f"Crop margins {margins} leave zero or negative area")
+        page.set_cropbox(new_rect)
+        self._is_dirty = True
+
+    def save(self, path: Path | None = None) -> None:
+        self._require_open()
+        assert self._doc is not None
+        target = path if path is not None else self._path
+        if target is None:
+            raise DocumentSaveError("Cannot save: no destination path")
+        try:
+            # incremental=False forces a full rewrite. For in-place save
+            # over the same path PyMuPDF requires incremental=True OR a
+            # temp-file dance; we use the temp-file dance because some
+            # operations (delete, insert) are incompatible with incremental.
+            if target == self._path:
+                tmp = target.with_suffix(target.suffix + ".pdfprism-tmp")
+                self._doc.save(str(tmp))
+                # Close the open document before swapping the file
+                # because Windows may hold the file lock.
+                self._doc.close()
+                self._doc = None
+                tmp.replace(target)
+                # Re-open the saved document so the adapter stays usable.
+                self._doc = pymupdf.open(str(target))
+            else:
+                self._doc.save(str(target))
+                self._path = target
+        except (OSError, RuntimeError) as exc:
+            raise DocumentSaveError(f"Save failed: {exc}") from exc
+        self._is_dirty = False

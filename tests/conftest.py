@@ -1,5 +1,6 @@
 """pytest configuration and shared fixtures."""
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,21 @@ def sample_pdf_path() -> Path:
         f"Missing fixture: {path}. Run: uv run python scripts/generate_sample_pdf.py"
     )
     return path
+
+
+@pytest.fixture
+def mutable_pdf_path(sample_pdf_path: Path, tmp_path: Path) -> Path:
+    """Writable copy of sample.pdf for mutation tests.
+
+    The committed sample.pdf is intentionally treated as read-only --
+    PR 8 page-operation tests need a copy they can rotate, delete from,
+    crop, save over, and reopen without polluting the fixture or other
+    tests. Copies on every request because pytest's tmp_path is unique
+    per-test.
+    """
+    dst = tmp_path / "mutable.pdf"
+    shutil.copy(sample_pdf_path, dst)
+    return dst
 
 
 @pytest.fixture
