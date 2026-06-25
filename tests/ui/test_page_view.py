@@ -4,12 +4,18 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QPointF
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsPolygonItem
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.types import SearchHit
 from pdfprism.ui.page_cache import PageCache
-from pdfprism.ui.widgets.page_view import PageView, ViewMode, ZoomMode
+from pdfprism.ui.widgets.page_view import (
+    PageView,
+    ToolMode,
+    ViewMode,
+    ZoomMode,
+)
 
 
 @pytest.fixture
@@ -414,3 +420,54 @@ class TestQuadHighlights:
             assert br.height() == 40.0 * _RENDER_SCALE
         finally:
             adapter.close()
+
+
+class TestSelection:
+    def test_default_tool_mode_is_hand(self, page_view: PageView) -> None:
+        assert page_view.tool_mode == ToolMode.HAND
+
+    def test_default_selected_text_is_empty(self, page_view: PageView) -> None:
+        assert page_view.selected_text == ""
+
+    def test_set_tool_mode_changes_mode(self, page_view: PageView) -> None:
+        page_view.set_tool_mode(ToolMode.SELECT)
+        assert page_view.tool_mode == ToolMode.SELECT
+
+    def test_set_tool_mode_emits_signal(self, page_view: PageView, qtbot) -> None:
+        with qtbot.waitSignal(page_view.tool_mode_changed, timeout=500) as blocker:
+            page_view.set_tool_mode(ToolMode.SELECT)
+        assert blocker.args == [ToolMode.SELECT]
+
+    def test_drag_selects_matching_words(
+        self,
+        page_view: PageView,
+        adapter_with_doc: PyMuPDFAdapter,
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.SELECT)
+        words = adapter_with_doc.extract_words(0)
+        hello = next(w for w in words if w.text == "Hello")
+        # _RENDER_SCALE is 2.0 -- scene coords are PDF coords * 2.
+        render_scale = 2.0
+        anchor = QPointF((hello.x0 - 1) * render_scale, (hello.y0 - 1) * render_scale)
+        current = QPointF((hello.x1 + 1) * render_scale, (hello.y1 + 1) * render_scale)
+        page_view._update_selection_from_drag(anchor, current)
+        assert page_view.selected_text == "Hello"
+
+    def test_clear_selection_resets_text(
+        self,
+        page_view: PageView,
+        adapter_with_doc: PyMuPDFAdapter,
+    ) -> None:
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.SELECT)
+        words = adapter_with_doc.extract_words(0)
+        hello = next(w for w in words if w.text == "Hello")
+        render_scale = 2.0
+        page_view._update_selection_from_drag(
+            QPointF((hello.x0 - 1) * render_scale, (hello.y0 - 1) * render_scale),
+            QPointF((hello.x1 + 1) * render_scale, (hello.y1 + 1) * render_scale),
+        )
+        assert page_view.selected_text == "Hello"
+        page_view.clear_selection()
+        assert page_view.selected_text == ""

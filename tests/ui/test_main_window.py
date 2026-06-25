@@ -4,10 +4,11 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from pdfprism.services.search import SearchScope
 from pdfprism.ui.main_window import MainWindow
+from pdfprism.ui.widgets.page_view import ToolMode
 
 
 @pytest.fixture(autouse=True)
@@ -320,3 +321,191 @@ class TestSearchToggles:
         main_window._on_find("Page")
         assert len(main_window._cross_search_results) >= 2
         assert {h.doc_index for h in main_window._cross_search_results} == {0, 1}
+
+
+class TestCopy:
+    def test_copy_with_no_active_tab_is_noop(self, main_window: MainWindow) -> None:
+        # Should not raise; should not write anything to clipboard either.
+        main_window._on_copy()
+
+    def test_copy_with_no_selection_is_noop(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        clipboard = QApplication.clipboard()
+        clipboard.clear()
+        main_window._on_copy()
+        # Empty selection -> clipboard remains empty.
+        assert clipboard.text() == ""
+
+    def test_copy_with_selection_writes_to_clipboard(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        from PySide6.QtCore import QPointF
+
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+        assert tab is not None
+        tab.page_view.set_tool_mode(ToolMode.SELECT)
+        words = tab.adapter.extract_words(0)
+        hello = next(w for w in words if w.text == "Hello")
+        render_scale = 2.0
+        tab.page_view._update_selection_from_drag(
+            QPointF((hello.x0 - 1) * render_scale, (hello.y0 - 1) * render_scale),
+            QPointF((hello.x1 + 1) * render_scale, (hello.y1 + 1) * render_scale),
+        )
+        clipboard = QApplication.clipboard()
+        clipboard.clear()
+        main_window._on_copy()
+        assert clipboard.text() == "Hello"
+
+
+class TestContextMenuSignalsWired:
+    def test_copy_signal_triggers_copy(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        from PySide6.QtCore import QPointF
+
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+        assert tab is not None
+        tab.page_view.set_tool_mode(ToolMode.SELECT)
+        words = tab.adapter.extract_words(0)
+        hello = next(w for w in words if w.text == "Hello")
+        render_scale = 2.0
+        tab.page_view._update_selection_from_drag(
+            QPointF((hello.x0 - 1) * render_scale, (hello.y0 - 1) * render_scale),
+            QPointF((hello.x1 + 1) * render_scale, (hello.y1 + 1) * render_scale),
+        )
+        clipboard = QApplication.clipboard()
+        clipboard.clear()
+        tab.page_view.copy_requested.emit()
+        assert clipboard.text() == "Hello"
+
+    def test_extract_selection_signal_writes_file(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtCore import QPointF
+        from PySide6.QtWidgets import QFileDialog
+
+        out_file = tmp_path / "selection.txt"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: (str(out_file), ""),
+        )
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+        assert tab is not None
+        tab.page_view.set_tool_mode(ToolMode.SELECT)
+        words = tab.adapter.extract_words(0)
+        hello = next(w for w in words if w.text == "Hello")
+        render_scale = 2.0
+        tab.page_view._update_selection_from_drag(
+            QPointF((hello.x0 - 1) * render_scale, (hello.y0 - 1) * render_scale),
+            QPointF((hello.x1 + 1) * render_scale, (hello.y1 + 1) * render_scale),
+        )
+        tab.page_view.extract_selection_requested.emit()
+        assert out_file.exists()
+        assert out_file.read_text(encoding="utf-8") == "Hello"
+
+
+class TestExtractMenu:
+    def test_extract_text_no_active_tab_is_noop(self, main_window: MainWindow) -> None:
+        main_window._on_extract_text()
+        assert main_window._active_tab is None
+
+    def test_extract_text_writes_all_pages(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QDialog, QFileDialog
+
+        out_file = tmp_path / "all.txt"
+        monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: (str(out_file), ""),
+        )
+        main_window._open_path(sample_pdf_path)
+        main_window._on_extract_text()
+        assert out_file.exists()
+        content = out_file.read_text(encoding="utf-8")
+        assert content.count("\f") == 2
+        assert "Page 1" in content
+        assert "Page 3" in content
+
+    def test_extract_images_text_only_pdf_reports_zero(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QDialog, QFileDialog
+
+        out_dir = tmp_path / "imgs"
+        out_dir.mkdir()
+        monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(
+            QFileDialog,
+            "getExistingDirectory",
+            lambda *a, **kw: str(out_dir),
+        )
+        info_called = []
+        monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: info_called.append(a))
+        main_window._open_path(sample_pdf_path)
+        main_window._on_extract_images()
+        assert info_called
+        assert list(out_dir.iterdir()) == []
+
+    def test_extract_text_cancelled_in_dialog_writes_nothing(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QDialog, QFileDialog
+
+        # If the user cancels the ExtractDialog, the save-file dialog
+        # should never be reached. Track whether it was called.
+        save_called: list[object] = []
+        monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: (save_called.append(1), ("", ""))[1],
+        )
+        main_window._open_path(sample_pdf_path)
+        main_window._on_extract_text()
+        assert save_called == []  # save dialog never reached
+
+
+class TestToolModePersistence:
+    def test_default_tool_mode_is_hand(self, main_window: MainWindow) -> None:
+        assert main_window._tool_mode == ToolMode.HAND
+
+    def test_setting_select_persists_to_qsettings(self, main_window: MainWindow) -> None:
+        main_window._on_set_tool_mode(ToolMode.SELECT)
+        settings = QSettings()
+        stored = settings.value("tool/mode", "", type=str)
+        assert stored == ToolMode.SELECT.value
+
+    def test_changing_mode_applies_to_open_tabs(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        main_window._open_path(sample_pdf_path)
+        main_window._on_set_tool_mode(ToolMode.SELECT)
+        for i in range(main_window._tab_widget.count()):
+            tab = main_window._tab_widget.widget(i)
+            assert tab.page_view.tool_mode == ToolMode.SELECT

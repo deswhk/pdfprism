@@ -10,7 +10,7 @@ from pdfprism.core.exceptions import (
     PageOutOfRangeError,
     PasswordRequiredError,
 )
-from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo, SearchHit, Word
+from pdfprism.core.types import DocumentInfo, ExtractedImage, OutlineItem, PageInfo, SearchHit, Word
 
 logger = logging.getLogger(__name__)
 
@@ -203,3 +203,40 @@ class PyMuPDFAdapter:
                 )
             )
         return words
+
+    def extract_text(self, index: int) -> str:
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {index} out of range [0, {self._doc.page_count})"
+            )
+        page = self._doc[index]
+        return str(page.get_text("text"))
+
+    def extract_images(self, index: int) -> list[ExtractedImage]:
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {index} out of range [0, {self._doc.page_count})"
+            )
+        page = self._doc[index]
+        images: list[ExtractedImage] = []
+        for img_info in page.get_images(full=True):
+            xref = int(img_info[0])
+            try:
+                data = self._doc.extract_image(xref)
+            except Exception:
+                continue
+            images.append(
+                ExtractedImage(
+                    page_index=index,
+                    xref=xref,
+                    width=int(data["width"]),
+                    height=int(data["height"]),
+                    ext=str(data["ext"]),
+                    data=bytes(data["image"]),
+                )
+            )
+        return images

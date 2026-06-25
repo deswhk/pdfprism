@@ -87,7 +87,7 @@ src/pdfprism/
 │   ├── security.py              # PR 10: password, permissions, sanitize
 │   ├── redaction.py             # PR 11: true content removal
 │   ├── ocr.py                   # PR 12: Tesseract pipeline
-│   ├── extract.py               # PR 7: text, images
+│   ├── extract.py               # PR 7: text + image extraction, snippet_around
 │   ├── compare.py               # PR 15: visual diff
 │   ├── optimize.py              # PR 13: compress, linearize
 │   └── combine.py               # PR 14: PDFs + images + .txt
@@ -479,6 +479,96 @@ extraction above the adapter; deferred to PR 7 (text extraction) so this
 PR doesn't grow the adapter contract. Persisting open tabs across sessions
 is a PR 6.5 candidate.
 
+## Extraction
+
+Text and image extraction live in `services/extract.py` behind a single
+`ExtractService` class bound to one adapter, mirroring `SearchService`.
+The adapter contract grew two methods -- `extract_text(index) -> str`
+and `extract_images(index) -> list[ExtractedImage]` -- and the service
+composes higher-level operations on top of those plus `extract_words`
+(originally added in PR 4.5 for the search slow path).
+
+Operations the service exposes:
+
+- `text_for_page(i)` -- single-page text, thin wrapper.
+- `text_full_document(page_range=None)` -- concatenates pages with
+  form-feed (`\f`) separators, the conventional plain-text separator
+  for paged dumps.
+- `text_in_rect(i, rect)` -- words on page `i` overlapping the given
+  rect, joined in reading order. Used by the right-click "Extract
+  Selection to File" path. Intersection is "any overlap," matching
+  how viewer selections work elsewhere.
+- `snippet_around(i, rect, max_chars=80)` -- the line of text
+  containing the hit, trimmed with ellipses around the hit's horizontal
+  midpoint. Used to label cross-search results: `Page N: ...context...`.
+- `images_full_document(out_dir, page_range=None)` -- writes one file
+  per image, named `page<N>_img<M>.<ext>` with 1-based N and M.
+
+The shared helper `_join_words_as_lines` reconstructs line breaks from
+y-coordinate jumps using each word's own height as the threshold. It is
+also imported by `PageView` for `selected_text`, so word-rect output and
+selection text use one reading-order algorithm.
+
+**Selection mechanic.** `PageView` grew a `ToolMode` enum (`HAND` /
+`SELECT`) parallel to the existing `ViewMode`. HAND keeps the PR 2
+behavior: scroll-hand drag pans. SELECT switches `setDragMode` to
+`NoDrag` so `PageView` handles drag itself in `mousePressEvent` /
+`mouseMoveEvent` / `mouseReleaseEvent`. On drag, the rect is mapped
+from scene coordinates to PDF page coordinates (divide by
+`_RENDER_SCALE`), `extract_words` is fetched for the current page,
+and overlapping words are stored in `_selected_words`. The overlay is
+rendered as translucent blue `QGraphicsPolygonItem`s -- the same scene-
+overlay pattern the search highlights use, just a different color and
+list. `selected_text` joins the words via `_join_words_as_lines` for
+consistent line-break reconstruction.
+
+Selection is intentionally single-page only in this PR. Continuous-mode
+selection across page boundaries needs page-relative coordinate mapping
+that the current scene layout doesn't expose cleanly; deferring rather
+than half-implementing keeps the contract clear.
+
+**Tool-mode persistence.** MainWindow owns the canonical `_tool_mode`,
+loaded from QSettings under `tool/mode` in `__init__` (default HAND),
+saved on every `_on_set_tool_mode` call. Same pattern as `view/dark_mode`
+from PR 5. UI sync (`_sync_tool_mode_ui`) updates two things: the
+exclusive `QActionGroup` for Hand Tool / Select Text in the View menu,
+and the `_tool_indicator` `QLabel` in the status bar. On open of a new
+tab, `_apply_tool_mode_to_all_tabs` (or the open-flow inline call) pushes
+the current mode into the new `DocumentView`'s `PageView` so freshly
+opened tabs match the user's chosen mode.
+
+**Clipboard and context menu.** Ctrl+C is wired to a `MainWindow._on_copy`
+slot that reads `selected_text` from the active tab's PageView and pushes
+it to `QApplication.clipboard()`. Right-click on `PageView` opens a
+context menu via `contextMenuEvent` with Copy + Extract Selection to
+File. The two menu items emit `copy_requested` / `extract_selection_
+requested` signals; MainWindow connects them at tab-open time, then the
+save-as path lives in `_on_extract_selection` with a `QFileDialog`
+anchored on `extract/last_dir` from QSettings.
+
+**Extract menus.** `File -> Extract -> Text...` and `File -> Extract ->
+Images...` open an `ExtractDialog` (page-count + kind) for picking all
+pages vs a range. The dialog returns a 0-based half-open `range` so the
+service can use it directly. After accept, MainWindow drives a file or
+directory picker (also remembering `extract/last_dir`), then calls
+`ExtractService.text_full_document` or `images_full_document`. The image
+path posts a final "Wrote N image(s)" info dialog because writing to
+a directory has no implicit "opened thing" the user can see.
+
+**Cross-search snippets.** When the search bar runs in `ALL_OPEN` scope,
+MainWindow now builds a parallel `snippets` list by calling
+`ExtractService.snippet_around` per hit (one service per doc cached in
+a local dict to avoid re-wrapping the adapter). `SearchResultsPanel.
+set_results` got an optional third `snippets` argument; when present,
+each row reads `Page N: snippet`. Empty snippet strings fall back to
+plain `Page N` so any extraction failure stays cosmetic.
+
+**Known limitations.** No formatted-text copy (HTML/RTF); plain text
+only. No glyph-level selection; word granularity covers the 90% case
+and glyph-level is a candidate for a later PR. No selection in
+continuous mode. No click-an-image-to-save; whole-document extract via
+the menu covers the bulk case.
+
 ## Theme
 
 `pdfprism.ui.theme.DARK_QSS` is a Qt Style Sheet (QSS) string applied
@@ -650,9 +740,17 @@ merges via PR review and CI on green.
 
 ### Milestone 2 — Extraction
 
-- PR 7: Text selection & copy, extract text/images to disk. Per-hit
-  snippets in the cross-search results panel land here as a side-effect
-  of having text-extract on the adapter.
+- **PR 7: Text selection, copy, extract to disk.** New `ExtractedImage`
+  type; adapter `extract_text` + `extract_images`; new `services/extract.py`
+  with text-in-rect, snippet-around-rect, full-doc text, full-doc image
+  extraction. `PageView` `ToolMode` enum (HAND/SELECT), drag-rect word
+  selection with blue translucent overlay, `selected_text` property,
+  `selection_changed` / `copy_requested` / `extract_selection_requested`
+  signals. MainWindow Hand Tool / Select Text actions persisted via
+  QSettings, status-bar tool indicator, Ctrl+C clipboard, right-click
+  context menu, `File -> Extract -> Text/Images...` menus with a shared
+  `ExtractDialog` page-range picker. Cross-search `SearchResultsPanel`
+  rows now show `Page N: snippet` when running with `ALL_OPEN` scope.
 
 ### Milestone 3 — Page Operations
 

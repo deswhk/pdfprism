@@ -23,11 +23,13 @@ from PySide6.QtWidgets import (
 from pdfprism.config import MAX_RECENT_FILES
 from pdfprism.core.exceptions import PdfPrismError
 from pdfprism.core.types import CrossDocHit
+from pdfprism.services.extract import ExtractService
 from pdfprism.services.search import SearchScope, SearchService
+from pdfprism.ui.dialogs.extract import ExtractDialog, ExtractKind
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
 from pdfprism.ui.theme import DARK_QSS
 from pdfprism.ui.widgets.document_view import DocumentView
-from pdfprism.ui.widgets.page_view import ViewMode
+from pdfprism.ui.widgets.page_view import ToolMode, ViewMode
 from pdfprism.ui.widgets.search_bar import SearchBar
 from pdfprism.ui.widgets.search_results_panel import SearchResultsPanel
 
@@ -51,6 +53,9 @@ class MainWindow(QMainWindow):
         settings = QSettings()
         self._fullscreen_state: dict[str, bool] | None = None
         self._dark_mode: bool = settings.value("view/dark_mode", False, type=bool)
+        self._tool_mode: ToolMode = ToolMode(
+            settings.value("tool/mode", ToolMode.HAND.value, type=str)
+        )
         self._recent_menu: QMenu | None = None
         self._main_toolbar: QToolBar | None = None
         self._active_tab: DocumentView | None = None
@@ -117,8 +122,10 @@ class MainWindow(QMainWindow):
         # Status bar widgets.
         self._page_indicator = QLabel("")
         self._zoom_indicator = QLabel("")
+        self._tool_indicator = QLabel("")
         self.statusBar().addPermanentWidget(self._page_indicator)
         self.statusBar().addPermanentWidget(self._zoom_indicator)
+        self.statusBar().addPermanentWidget(self._tool_indicator)
 
         self._build_actions()
         self._build_menus()
@@ -128,6 +135,7 @@ class MainWindow(QMainWindow):
 
         self.act_toggle_dark_mode.setChecked(self._dark_mode)
         self._apply_theme()
+        self._sync_tool_mode_ui()
         self._update_recent_menu()
         self._update_status_bar()
         self._update_actions_enabled()
@@ -227,6 +235,31 @@ class MainWindow(QMainWindow):
         self.act_toggle_dark_mode.setCheckable(True)
         self.act_toggle_dark_mode.triggered.connect(self._on_toggle_dark_mode)
 
+        self.act_tool_hand = QAction("&Hand Tool", self)
+        self.act_tool_hand.setShortcut("H")
+        self.act_tool_hand.setCheckable(True)
+        self.act_tool_hand.triggered.connect(lambda: self._on_set_tool_mode(ToolMode.HAND))
+
+        self.act_tool_select = QAction("&Select Text", self)
+        self.act_tool_select.setShortcut("V")
+        self.act_tool_select.setCheckable(True)
+        self.act_tool_select.triggered.connect(lambda: self._on_set_tool_mode(ToolMode.SELECT))
+
+        self.act_copy = QAction("&Copy", self)
+        self.act_copy.setShortcut(QKeySequence.StandardKey.Copy)
+        self.act_copy.triggered.connect(self._on_copy)
+
+        self.act_extract_text = QAction("Extract &Text...", self)
+        self.act_extract_text.triggered.connect(self._on_extract_text)
+
+        self.act_extract_images = QAction("Extract &Images...", self)
+        self.act_extract_images.triggered.connect(self._on_extract_images)
+
+        self._tool_action_group = QActionGroup(self)
+        self._tool_action_group.addAction(self.act_tool_hand)
+        self._tool_action_group.addAction(self.act_tool_select)
+        self._tool_action_group.setExclusive(True)
+
         self.act_fit_page = QAction("Fit &Page", self)
         self.act_fit_page.setShortcut("Ctrl+0")
         self.act_fit_page.triggered.connect(self._on_fit_page)
@@ -273,6 +306,11 @@ class MainWindow(QMainWindow):
             self.act_continuous,
             self.act_fullscreen,
             self.act_toggle_dark_mode,
+            self.act_tool_hand,
+            self.act_tool_select,
+            self.act_copy,
+            self.act_extract_text,
+            self.act_extract_images,
             self.act_fit_page,
             self.act_fit_width,
             self.act_actual_size,
@@ -290,6 +328,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_open)
         self._recent_menu = file_menu.addMenu("Open &Recent")
         file_menu.addAction(self.act_close_doc)
+        extract_menu = file_menu.addMenu("&Extract")
+        extract_menu.addAction(self.act_extract_text)
+        extract_menu.addAction(self.act_extract_images)
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
 
@@ -314,6 +355,9 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.act_fullscreen)
         view_menu.addAction(self.act_toggle_dark_mode)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_tool_hand)
+        view_menu.addAction(self.act_tool_select)
 
         go_menu = menubar.addMenu("&Go")
         go_menu.addAction(self.act_first_page)
@@ -482,6 +526,9 @@ class MainWindow(QMainWindow):
 
         tab_idx = self._add_tab(doc_view)
         self._tab_widget.setCurrentIndex(tab_idx)
+        doc_view.page_view.set_tool_mode(self._tool_mode)
+        doc_view.page_view.copy_requested.connect(self._on_copy)
+        doc_view.page_view.extract_selection_requested.connect(self._on_extract_selection)
         self._add_recent_file(path)
 
     # ----- navigation slots -----
@@ -593,7 +640,8 @@ class MainWindow(QMainWindow):
             whole_word=self._search_bar.whole_word,
         )
         self._cross_search_results = results
-        self._results_panel.set_results(results, titles)
+        snippets = self._build_snippets_for_cross_results(results)
+        self._results_panel.set_results(results, titles, snippets)
         docs_with_hits = len({r.doc_index for r in results})
         if results:
             self._results_dock.setVisible(True)
@@ -810,6 +858,174 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if isinstance(app, QApplication):
             app.setStyleSheet(DARK_QSS if self._dark_mode else "")
+
+    def _on_set_tool_mode(self, mode: ToolMode) -> None:
+        if mode == self._tool_mode:
+            return
+        self._tool_mode = mode
+        settings = QSettings()
+        settings.setValue("tool/mode", mode.value)
+        self._sync_tool_mode_ui()
+        self._apply_tool_mode_to_all_tabs()
+
+    def _sync_tool_mode_ui(self) -> None:
+        """Keep menu checkmarks and status indicator in sync with the
+        current tool mode."""
+        if self._tool_mode == ToolMode.HAND:
+            self.act_tool_hand.setChecked(True)
+            self._tool_indicator.setText("Hand")
+        else:
+            self.act_tool_select.setChecked(True)
+            self._tool_indicator.setText("Select")
+
+    def _apply_tool_mode_to_all_tabs(self) -> None:
+        """Push the current tool mode into every open tab's PageView."""
+        for i in range(self._tab_widget.count()):
+            tab = self._tab_widget.widget(i)
+            if isinstance(tab, DocumentView):
+                tab.page_view.set_tool_mode(self._tool_mode)
+
+    def _on_copy(self) -> None:
+        """Ctrl+C handler. Copies the active tab's selected text to the
+        system clipboard. Silently no-ops when nothing is selected or no
+        tab is active -- matches how other apps treat empty-selection Copy."""
+        if self._active_tab is None:
+            return
+        text = self._active_tab.page_view.selected_text
+        if not text:
+            return
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            clipboard = app.clipboard()
+            if clipboard is not None:
+                clipboard.setText(text)
+
+    def _on_extract_selection(self) -> None:
+        """Right-click "Extract Selection to File..." handler. Saves the
+        active tab's selected text to a .txt file chosen by the user."""
+        if self._active_tab is None:
+            return
+        text = self._active_tab.page_view.selected_text
+        if not text:
+            return
+        settings = QSettings()
+        last_dir = settings.value("extract/last_dir", "", type=str)
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, "Save Selection", last_dir, "Text files (*.txt);;All files (*)"
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        settings.setValue("extract/last_dir", str(path.parent))
+        try:
+            path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", f"Could not write {path}: {exc}")
+
+    def _on_extract_text(self) -> None:
+        """File -> Extract -> Text... slot. Extracts the chosen page
+        range to a single .txt file (form-feed between pages).
+        """
+        if self._active_tab is None:
+            return
+        page_count = self._active_tab.page_view.page_count
+        if page_count == 0:
+            return
+        dialog = ExtractDialog(page_count, ExtractKind.TEXT, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = QSettings()
+        last_dir = settings.value("extract/last_dir", "", type=str)
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save extracted text",
+            last_dir,
+            "Text files (*.txt);;All files (*)",
+        )
+        if not path_str:
+            return
+        out_path = Path(path_str)
+        settings.setValue("extract/last_dir", str(out_path.parent))
+        service = ExtractService(self._active_tab.adapter)
+        text = service.text_full_document(page_range=dialog.page_range)
+        try:
+            out_path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Save failed",
+                f"Could not write {out_path}: {exc}",
+            )
+
+    def _on_extract_images(self) -> None:
+        """File -> Extract -> Images... slot. Extracts the chosen page
+        range to a chosen directory; one file per image, named
+        ``page<N>_img<M>.<ext>``.
+        """
+        if self._active_tab is None:
+            return
+        page_count = self._active_tab.page_view.page_count
+        if page_count == 0:
+            return
+        dialog = ExtractDialog(page_count, ExtractKind.IMAGES, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = QSettings()
+        last_dir = settings.value("extract/last_dir", "", type=str)
+        out_dir_str = QFileDialog.getExistingDirectory(self, "Choose output directory", last_dir)
+        if not out_dir_str:
+            return
+        out_dir = Path(out_dir_str)
+        settings.setValue("extract/last_dir", str(out_dir))
+        service = ExtractService(self._active_tab.adapter)
+        try:
+            written = service.images_full_document(out_dir, page_range=dialog.page_range)
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Extract failed",
+                f"Could not write to {out_dir}: {exc}",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Extract complete",
+            f"Wrote {len(written)} image(s) to {out_dir}",
+        )
+
+    def _build_snippets_for_cross_results(self, results: list[CrossDocHit]) -> list[str]:
+        """Build a parallel snippet list for cross-search hits.
+
+        One ExtractService per doc index, cached locally so we do not
+        re-wrap the same adapter once per hit. Empty string on any
+        extraction failure -- the panel falls back to plain Page N.
+        """
+        snippets: list[str] = []
+        services: dict[int, ExtractService] = {}
+        for r in results:
+            try:
+                service = services.get(r.doc_index)
+                if service is None:
+                    tab = self._tab_widget.widget(r.doc_index)
+                    if not isinstance(tab, DocumentView):
+                        snippets.append("")
+                        continue
+                    service = ExtractService(tab.adapter)
+                    services[r.doc_index] = service
+                snippets.append(
+                    service.snippet_around(
+                        r.hit.page_index,
+                        (
+                            r.hit.x0,
+                            r.hit.y0,
+                            r.hit.x1,
+                            r.hit.y1,
+                        ),
+                    )
+                )
+            except Exception:
+                snippets.append("")
+        return snippets
 
     def _load_recent_files(self) -> list[Path]:
         settings = QSettings()

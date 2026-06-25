@@ -8,7 +8,7 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 Under active development. Milestone 1 (Reader Core) is the current focus; see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full 15-PR roadmap.
 
-**What works today (through PR 4.5):**
+**What works today (through PR 7):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
@@ -21,8 +21,10 @@ Under active development. Milestone 1 (Reader Core) is the current focus; see [`
 - Multi-document tabs: open many PDFs at once, switch with Ctrl+PgUp/PgDown, close with Ctrl+W
 - Cross-PDF search ("All open documents" scope): a right-side results panel groups matches by document; F3/Shift+F3 walk the flat result list across docs and auto-switch tabs at boundaries
 - Project-relative logging when running from source; OS-standard app-data location when packaged
+- Text selection with a Hand/Select tool toggle (H / V), drag-rect word selection with blue translucent highlight, Ctrl+C copy, and a right-click context menu for Copy or Extract Selection to File
+- File → Extract menu for whole-document Text and Images extraction, with a page-range dialog; per-hit context snippets now show beside each result in the cross-document search panel
 
-**Coming next:** Milestone 2 begins with PR 7 — text selection, copy, and extraction of text and images. Per-hit snippets in the cross-search results panel land as a side-effect.
+**Coming next:** Milestone 1 + 2 are complete. Milestone 3 begins with PR 8 — page operations (rotate, delete, insert, reorder, split, merge, crop, duplicate).
 
 ## Scope
 
@@ -79,6 +81,9 @@ Then `File > Open` (Ctrl+O) to choose a PDF, or pick one from `File > Open Recen
 | Find | Ctrl+F |
 | Find next | F3 |
 | Find previous | Shift+F3 |
+| Copy selected text | Ctrl+C |
+| Hand tool (pan) | H |
+| Select Text tool | V |
 | Previous page | PgUp |
 | Next page | PgDown |
 | First page | Ctrl+Home |
@@ -96,7 +101,7 @@ Then `File > Open` (Ctrl+O) to choose a PDF, or pick one from `File > Open Recen
 | Toggle full-screen | F11 |
 | Exit full-screen | Esc |
 | Ctrl + mouse wheel | Zoom |
-| Click and drag | Pan |
+| Click and drag | Pan (Hand tool) / Select text (Select tool) |
 
 Logs are written to `<project>/logs/pdfprism.log` when running from source, or to the OS-standard app-data location when running from a packaged install.
 

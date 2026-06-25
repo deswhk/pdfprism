@@ -101,3 +101,25 @@ class TestSelection:
         panel.set_results(results, ["a.pdf"])
         panel.set_current(99)
         # No crash; selection state unchanged.
+
+
+class TestSnippets:
+    def test_snippet_appears_in_label(self, panel: SearchResultsPanel) -> None:
+        results = [CrossDocHit(doc_index=0, hit=_hit(0))]
+        panel.set_results(results, ["a.pdf"], snippets=["context around hit"])
+        doc_item = panel._tree.topLevelItem(0)
+        hit_item = doc_item.child(0)
+        assert "context around hit" in hit_item.text(0)
+        assert "Page 1" in hit_item.text(0)
+
+    def test_empty_snippet_falls_back_to_plain_label(self, panel: SearchResultsPanel) -> None:
+        results = [CrossDocHit(doc_index=0, hit=_hit(0))]
+        panel.set_results(results, ["a.pdf"], snippets=[""])
+        hit_item = panel._tree.topLevelItem(0).child(0)
+        assert hit_item.text(0) == "Page 1"
+
+    def test_omitted_snippets_arg_is_backward_compatible(self, panel: SearchResultsPanel) -> None:
+        results = [CrossDocHit(doc_index=0, hit=_hit(0))]
+        panel.set_results(results, ["a.pdf"])
+        hit_item = panel._tree.topLevelItem(0).child(0)
+        assert hit_item.text(0) == "Page 1"

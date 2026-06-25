@@ -270,3 +270,36 @@ class TestRotationProjection:
         w = page_words[0]
         assert w.x0 > 400
         assert w.x1 < 595
+
+
+class TestExtractText:
+    def test_returns_first_page_text(self, opened_adapter: PyMuPDFAdapter) -> None:
+        assert opened_adapter.extract_text(0) == "Hello from pdfprism\nPage 1 of 3\n"
+
+    def test_each_page_has_some_text(self, opened_adapter: PyMuPDFAdapter) -> None:
+        for i in range(opened_adapter.page_count):
+            text = opened_adapter.extract_text(i)
+            assert "Page" in text
+
+    def test_out_of_range_positive_raises(self, opened_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            opened_adapter.extract_text(opened_adapter.page_count)
+
+    def test_out_of_range_negative_raises(self, opened_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            opened_adapter.extract_text(-1)
+
+
+class TestExtractImages:
+    def test_returns_list(self, opened_adapter: PyMuPDFAdapter) -> None:
+        images = opened_adapter.extract_images(0)
+        assert isinstance(images, list)
+
+    def test_text_only_fixture_has_no_images(self, opened_adapter: PyMuPDFAdapter) -> None:
+        # sample.pdf is text-only; every page returns 0 images.
+        for i in range(opened_adapter.page_count):
+            assert opened_adapter.extract_images(i) == []
+
+    def test_out_of_range_raises(self, opened_adapter: PyMuPDFAdapter) -> None:
+        with pytest.raises(PageOutOfRangeError):
+            opened_adapter.extract_images(opened_adapter.page_count)
