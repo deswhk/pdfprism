@@ -22,13 +22,20 @@ from PySide6.QtWidgets import (
 )
 
 from pdfprism.config import MAX_RECENT_FILES
+from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.exceptions import PdfPrismError
 from pdfprism.core.types import CrossDocHit
 from pdfprism.services.extract import ExtractService
+from pdfprism.services.pages import PageService
+from pdfprism.services.pages import merge as merge_documents
 from pdfprism.services.search import SearchScope, SearchService
 from pdfprism.ui.dialogs.crop import CropDialog
 from pdfprism.ui.dialogs.extract import ExtractDialog, ExtractKind
+from pdfprism.ui.dialogs.extract_pages import ExtractPagesDialog
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
+from pdfprism.ui.dialogs.insert_pages import InsertPagesDialog
+from pdfprism.ui.dialogs.merge import MergeDialog
+from pdfprism.ui.dialogs.split import SplitDialog
 from pdfprism.ui.theme import DARK_QSS
 from pdfprism.ui.widgets.document_view import DocumentView
 from pdfprism.ui.widgets.page_view import ToolMode, ViewMode
@@ -306,6 +313,23 @@ class MainWindow(QMainWindow):
         self.act_extract_images = QAction("Extract &Images...", self)
         self.act_extract_images.triggered.connect(self._on_extract_images)
 
+        # Cross-document page operations (PR 8.5).
+        self.act_extract_pages = QAction("&Extract Pages to File...", self)
+        self.act_extract_pages.triggered.connect(self._on_extract_pages)
+        self.act_extract_pages.setEnabled(False)
+
+        self.act_insert_pages = QAction("&Insert Pages from File...", self)
+        self.act_insert_pages.triggered.connect(self._on_insert_pages)
+        self.act_insert_pages.setEnabled(False)
+
+        self.act_split = QAction("&Split Document...", self)
+        self.act_split.triggered.connect(self._on_split)
+        self.act_split.setEnabled(False)
+
+        self.act_merge = QAction("&Merge Documents...", self)
+        self.act_merge.triggered.connect(self._on_merge)
+        self.act_merge.setEnabled(False)
+
         self._tool_action_group = QActionGroup(self)
         self._tool_action_group.addAction(self.act_tool_hand)
         self._tool_action_group.addAction(self.act_tool_select)
@@ -364,6 +388,10 @@ class MainWindow(QMainWindow):
             self.act_copy,
             self.act_extract_text,
             self.act_extract_images,
+            self.act_extract_pages,
+            self.act_insert_pages,
+            self.act_split,
+            self.act_merge,
             self.act_rotate_right,
             self.act_rotate_left,
             self.act_rotate_180,
@@ -396,6 +424,12 @@ class MainWindow(QMainWindow):
         extract_menu = file_menu.addMenu("&Extract")
         extract_menu.addAction(self.act_extract_text)
         extract_menu.addAction(self.act_extract_images)
+        pages_menu = file_menu.addMenu("&Pages")
+        pages_menu.addAction(self.act_extract_pages)
+        pages_menu.addAction(self.act_insert_pages)
+        pages_menu.addSeparator()
+        pages_menu.addAction(self.act_split)
+        pages_menu.addAction(self.act_merge)
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
 
@@ -1172,6 +1206,118 @@ class MainWindow(QMainWindow):
 
     # ----- save / modified-tracking slots -----
 
+    def _on_extract_pages(self) -> None:
+        """File -> Pages -> Extract Pages to File... slot."""
+        tab = self._active_tab
+        if tab is None:
+            return
+        dlg = ExtractPagesDialog(
+            source_path=tab.path,
+            page_count=tab.page_view.page_count,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        from_idx, to_idx = dlg.page_range
+        try:
+            PageService(tab.adapter).extract_to_file(from_idx, to_idx, dlg.output_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Extract Pages", str(exc))
+            return
+        self.statusBar().showMessage(f"Wrote {dlg.output_path.name}", 5000)
+
+    def _on_insert_pages(self) -> None:
+        """File -> Pages -> Insert Pages from File... slot."""
+        tab = self._active_tab
+        if tab is None:
+            return
+        settings = QSettings()
+        last_dir = settings.value("recent/last_dir", "", type=str)
+        source_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Source PDF",
+            last_dir,
+            "PDF files (*.pdf);;All files (*)",
+        )
+        if not source_str:
+            return
+        source_path = Path(source_str)
+        # Read source page count headlessly to bound the dialog.
+        probe = PyMuPDFAdapter()
+        try:
+            probe.open(source_path)
+            source_count = probe.page_count
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Insert Pages",
+                f"Cannot open {source_path.name}: {exc}",
+            )
+            return
+        finally:
+            probe.close()
+        current_page = tab.page_view.current_page
+        dlg = InsertPagesDialog(
+            source_path=source_path,
+            source_page_count=source_count,
+            target_name=tab.path.name,
+            target_page_count=tab.page_view.page_count,
+            default_target_position=current_page + 2,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        from_idx, to_idx = dlg.source_range
+        try:
+            tab.insert_from(source_path, from_idx, to_idx, dlg.target_position)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Insert Pages", str(exc))
+
+    def _on_split(self) -> None:
+        """File -> Pages -> Split Document... slot."""
+        tab = self._active_tab
+        if tab is None:
+            return
+        dlg = SplitDialog(
+            source_path=tab.path,
+            page_count=tab.page_view.page_count,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            paths = PageService(tab.adapter).split(dlg.breakpoints, dlg.output_dir, dlg.stem)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Split", str(exc))
+            return
+        names = "\n".join(p.name for p in paths)
+        QMessageBox.information(
+            self,
+            "Split",
+            f"Wrote {len(paths)} file(s) to {dlg.output_dir}:\n\n{names}",
+        )
+
+    def _on_merge(self) -> None:
+        """File -> Pages -> Merge Documents... slot."""
+        n = self._tab_widget.count()
+        if n < 2:
+            return
+        settings = QSettings()
+        last_dir = settings.value("recent/last_dir", "", type=str)
+        titles = [self._tab_widget.tabText(i) for i in range(n)]
+        default = Path(last_dir) / "merged.pdf" if last_dir else Path("merged.pdf")
+        dlg = MergeDialog(tab_titles=titles, default_output_path=default, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        sources = [self._tab_widget.widget(i).adapter for i in dlg.selected_tab_indices]
+        try:
+            merge_documents(sources, dlg.output_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Merge", str(exc))
+            return
+        # Open the merged result as a new tab.
+        self._open_path(dlg.output_path)
+
     def _on_save(self) -> None:
         if self._active_tab is None:
             return
@@ -1239,8 +1385,13 @@ class MainWindow(QMainWindow):
             self.act_duplicate_page,
             self.act_move_page,
             self.act_crop_page,
+            self.act_extract_pages,
+            self.act_insert_pages,
+            self.act_split,
         ):
             act.setEnabled(has_tab)
+        # Merge requires at least 2 open tabs.
+        self.act_merge.setEnabled(self._tab_widget.count() >= 2)
 
     def _prompt_unsaved_changes(self, doc_view: DocumentView) -> bool:
         """Modal prompt for a modified document.

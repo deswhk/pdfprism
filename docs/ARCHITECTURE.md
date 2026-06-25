@@ -102,7 +102,7 @@ src/pdfprism/
 │   │   ├── search_results_panel.py  # PR 6: cross-doc search results tree
 │   │   ├── thumbnail_panel.py   # QListView thumbnail strip
 │   │   └── outline_panel.py     # QTreeView outline (TOC)
-│   └── dialogs/                 # goto_page; extract (PR 7); crop (PR 8); password (PR 10+), merge (PR 9+)
+│   └── dialogs/                 # goto_page; extract (PR 7); crop (PR 8); extract_pages/insert_pages/split/merge (PR 8.5); password (PR 10+)
 ├── config.py                    # App constants (name, org, MAX_RECENT_FILES, etc.)
 ├── logging_config.py            # Stdlib logging setup
 └── app.py                       # Entry point
@@ -691,6 +691,106 @@ to keep PR 8 reviewable. Rich Organize panel UI (drag-reorder,
 multi-select, live crop preview) is PR 9. Undo command stack is
 deferred -- close-without-save is the v1 undo story.
 
+## Cross-Document Page Operations
+
+PR 8.5 adds the four operations that span multiple documents:
+extract pages to a new file, insert pages from another file, split
+one document into many, and merge many documents into one. Together
+they finish Milestone 3's page-operation surface; PR 9 then lifts
+these into the rich Organize Pages panel.
+
+**Adapter additions.** Two new methods on ``DocumentAdapter``:
+
+- ``new_document()`` -- close any open doc and replace with an
+  empty in-memory PDF (``_path = None``). The empty doc has
+  ``is_dirty == False``; ``save()`` without an explicit path raises
+  because there is no source path to default to. Always followed by
+  ``insert_pdf`` in practice -- PyMuPDF refuses to save a zero-page
+  document.
+- ``insert_pdf(source, from_index, to_index, at_index)`` -- copy a
+  page range from another adapter into self. ``to_index`` is
+  **inclusive** (matches PyMuPDF native semantics and reads more
+  naturally for users -- "insert pages 3 through 7"). ``at_index``
+  is 0-based; ``page_count`` means append. Self becomes dirty;
+  source is unchanged.
+
+``insert_pdf`` is the only place the adapter reaches across
+instances. The implementation reads the source's private ``_doc``
+attribute because PyMuPDF's ``Document.insert_pdf`` wants a
+``pymupdf.Document``, not a Protocol. This same-engine assumption
+is documented in code; if we ever swap engines, we swap all of
+them at once.
+
+**Service layer.** ``services/pages.py`` gains three methods on
+``PageService`` and one free function:
+
+- ``extract_to_file(from_index, to_index, output_path)`` -- create
+  a fresh adapter, ``new_document`` it, ``insert_pdf`` the range,
+  ``save(output_path)``, close. Source untouched.
+- ``insert_from(source_path, from_index, to_index, at_index)`` --
+  open source headlessly, ``insert_pdf`` into self, close. Self
+  becomes dirty.
+- ``split(breakpoints, output_dir, stem)`` -- breakpoints are
+  0-based slice-start indices (the first slice always starts at
+  0). Files are named ``f"{stem}-{N:0Wd}.pdf"`` with N 1-based
+  and W matching the digit count of the largest output. Returns
+  the written paths in slice order.
+- ``merge(sources, output_path)`` -- free function, not a
+  ``PageService`` method, because it fundamentally takes a list of
+  adapters rather than binding to one. Each source's **in-memory**
+  state is merged (including any unsaved mutations). Sources are
+  not modified. Raises ``PageOperationError`` if given fewer than
+  two sources.
+
+**Dialogs.** Four new modals in ``ui/dialogs/`` mirror the four
+operations. Each dialog is dumb -- it gathers user input and
+exposes computed values via properties, with no knowledge of
+adapters or services. The split dialog runs its own input
+validation (out-of-range page numbers, non-integer text) on OK and
+stays open with a warning if the input is invalid; the calling
+slot only sees a valid breakpoints list when ``Accepted``. The
+merge dialog uses a ``QListWidget`` with item check states for
+selection, plus Up/Down buttons for ordering -- richer drag-reorder
+is deferred to the PR 9 Organize panel where drag is the main
+interaction. All four dialogs disable OK until the required output
+path (or directory) is set, so the user can't accidentally start
+the operation without a destination.
+
+**MainWindow surface.** A new File → Pages submenu groups all
+four operations: Extract Pages to File..., Insert Pages from
+File..., Split Document..., Merge Documents... The first three
+enable with any open tab; Merge requires at least two. Each slot
+follows the same shape: build dialog, exec, route through
+service/adapter, surface errors via QMessageBox. Insert is the
+only one that mutates the bound document; it goes through a new
+``DocumentView.insert_from`` proxy that re-binds the thumbnail
+panel and page view exactly like PR 8's single-doc proxies
+(thumbnail before page view -- see Page Operations for the
+rationale). Merge opens the result as a new tab so the user can
+verify what they just produced; Extract and Split leave the user
+on the source document because the outputs are conceptually side
+files.
+
+**Source-file handling for Insert.** The source PDF is opened
+headlessly twice: once briefly inside the slot to read its page
+count (so the dialog can bound its spinboxes), then again inside
+``PageService.insert_from`` to actually do the insert. Two opens
+are cheap and keep the dialog stateless; the alternative would be
+for the dialog to hold an adapter through its lifetime, which
+muddies the lifecycle.
+
+**No tab for source documents.** Insert opens its source
+headlessly and closes it after the insert; it does not stay
+around as a tab. The source is a one-shot resource for the
+operation. If the user wants to view it, they open it separately.
+
+**Deferred to PR 9.** Drag-to-reorder for merge, multi-select
+page operations, live crop preview, and the Organize Pages panel
+that surfaces the cross-doc operations as toolbar buttons
+alongside the single-doc ones. Inches/mm unit conversion for crop
+is also a PR 9 candidate. Customizable filename patterns for
+split outputs are deferred indefinitely.
+
 ## Theme
 
 `pdfprism.ui.theme.DARK_QSS` is a Qt Style Sheet (QSS) string applied
@@ -889,8 +989,14 @@ merges via PR review and CI on green.
   Rotate 180°, Insert Blank Page After, Duplicate, Move Page...
   (Ctrl+Shift+M), Crop Page... (new `CropDialog`), Delete Current Page
   (with confirmation).
-- PR 8.5: cross-document page operations (split, merge, insert pages
-  from another PDF, extract-to-new-file).
+- **PR 8.5: cross-document page operations.** Adapter additions
+  ``new_document`` (open empty in-memory PDF) and ``insert_pdf``
+  (copy a page range from another adapter). ``PageService`` gains
+  ``extract_to_file``, ``insert_from``, and ``split``; a free
+  ``merge`` function combines multiple adapters into one file.
+  Four new dialogs (``ExtractPagesDialog``, ``InsertPagesDialog``,
+  ``SplitDialog``, ``MergeDialog``) and a File → Pages submenu
+  surface them.
 - PR 9: "Organize Pages" UI (drag-reorder, multi-select, live crop
   preview).
 

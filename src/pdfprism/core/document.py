@@ -211,3 +211,30 @@ class DocumentAdapter(Protocol):
             DocumentSaveError: if the write fails for any reason.
         """
         ...
+
+    def new_document(self) -> None:
+        """Open a new empty in-memory PDF.
+
+        Closes any currently open document and replaces it with an
+        empty PDF that has no source path. The adapter is then
+        usable as a target for ``insert_pdf`` (the building block
+        for split and merge operations). Because there is no
+        source path, ``save()`` without a path argument raises;
+        the caller must invoke ``save(path)`` explicitly.
+        """
+        ...
+
+    def insert_pdf(
+        self, source: "DocumentAdapter", from_index: int, to_index: int, at_index: int
+    ) -> None:
+        """Insert pages ``from_index..to_index`` (inclusive) of
+        ``source`` into ``self`` before position ``at_index``.
+
+        ``at_index`` is 0-based: 0 prepends, ``page_count`` appends.
+        Source is left unchanged; ``self`` becomes dirty.
+
+        Raises ``PageOutOfRangeError`` for any out-of-range index
+        and ``PageOperationError`` for ``to_index < from_index``
+        or when ``source`` is not open.
+        """
+        ...

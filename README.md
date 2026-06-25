@@ -8,7 +8,7 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 Under active development. Milestone 1 (Reader Core) is the current focus; see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full 15-PR roadmap.
 
-**What works today (through PR 8):**
+**What works today (through PR 8.5):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
@@ -26,8 +26,9 @@ Under active development. Milestone 1 (Reader Core) is the current focus; see [`
 - Page operations on the current page: rotate (Ctrl+R / Ctrl+Shift+R / 180°), delete (with confirmation), insert blank page after, duplicate, move (Ctrl+Shift+M), and crop (margin dialog in PDF points)
 - Save (Ctrl+S) writes mutations in place; Save As (Ctrl+Shift+S) writes to a new path. Modified tabs show ` *` in the tab title; closing a modified tab prompts Save / Discard / Cancel
 - Edit menu reorganized: Find actions stay at the top; new Edit → Page submenu groups all page operations
+- Cross-document page operations via the new File → Pages submenu: Extract Pages to File (save a page range as a new PDF), Insert Pages from File (insert a range from another PDF at a chosen position), Split Document (every N pages or at specified page boundaries, with zero-padded output names), and Merge Documents (pick from open tabs with reorder, opens the result as a new tab)
 
-**Coming next:** Milestone 1 + 2 are complete and Milestone 3 is in progress. PR 8.5 adds cross-document page operations (split, merge, insert pages from another PDF). PR 9 brings the rich Organize Pages UI with drag-to-reorder and a live crop preview.
+**Coming next:** Milestone 3 is essentially feature-complete on the menu surface. PR 9 brings the rich Organize Pages UI with drag-to-reorder, multi-select page operations, and a live crop preview.
 
 ## Scope
 

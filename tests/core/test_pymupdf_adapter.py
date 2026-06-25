@@ -9,6 +9,7 @@ from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.document import DocumentAdapter
 from pdfprism.core.exceptions import (
     DocumentOpenError,
+    DocumentSaveError,
     PageOperationError,
     PageOutOfRangeError,
 )
@@ -527,3 +528,164 @@ class TestSave:
         # will trigger before the path check).
         with pytest.raises(Exception):  # noqa: B017,PT011 - either subclass is fine
             a.save()
+
+
+class TestNewDocument:
+    def test_creates_empty_doc(self) -> None:
+        a = PyMuPDFAdapter()
+        try:
+            a.new_document()
+            assert a.page_count == 0
+            assert a.is_dirty is False
+        finally:
+            a.close()
+
+    def test_closes_any_open_doc(self, sample_pdf_path: Path) -> None:
+        a = PyMuPDFAdapter()
+        try:
+            a.open(sample_pdf_path)
+            assert a.page_count > 0
+            a.new_document()
+            assert a.page_count == 0
+        finally:
+            a.close()
+
+    def test_save_without_path_raises(self) -> None:
+        a = PyMuPDFAdapter()
+        try:
+            a.new_document()
+            with pytest.raises(DocumentSaveError):
+                a.save()
+        finally:
+            a.close()
+
+    def test_save_after_insert_writes_file(self, mutable_pdf_path: Path, tmp_path: Path) -> None:
+        # PyMuPDF refuses to save a zero-page document, so we insert at
+        # least one page before saving. This is the realistic use case
+        # for new_document anyway -- it is always followed by insert_pdf.
+        target = PyMuPDFAdapter()
+        source = PyMuPDFAdapter()
+        try:
+            target.new_document()
+            source.open(mutable_pdf_path)
+            target.insert_pdf(source, 0, 0, 0)
+            out = tmp_path / "out.pdf"
+            target.save(out)
+            assert out.exists()
+            assert target.is_dirty is False
+        finally:
+            target.close()
+            source.close()
+
+
+class TestInsertPdf:
+    def _open_source(self, mutable_pdf_path: Path) -> PyMuPDFAdapter:
+        a = PyMuPDFAdapter()
+        a.open(mutable_pdf_path)
+        return a
+
+    def test_insert_all_pages_into_empty(self, mutable_pdf_path: Path) -> None:
+        target = PyMuPDFAdapter()
+        source = self._open_source(mutable_pdf_path)
+        try:
+            target.new_document()
+            target.insert_pdf(source, 0, source.page_count - 1, 0)
+            assert target.page_count == source.page_count
+            assert target.is_dirty is True
+        finally:
+            target.close()
+            source.close()
+
+    def test_insert_partial_range(self, mutable_pdf_path: Path) -> None:
+        target = PyMuPDFAdapter()
+        source = self._open_source(mutable_pdf_path)
+        try:
+            target.new_document()
+            target.insert_pdf(source, 1, 2, 0)
+            assert target.page_count == 2
+        finally:
+            target.close()
+            source.close()
+
+    def test_append_using_target_page_count(self, mutable_pdf_path: Path) -> None:
+        target = PyMuPDFAdapter()
+        source = self._open_source(mutable_pdf_path)
+        try:
+            target.new_document()
+            target.insert_pdf(source, 0, 0, 0)
+            target.insert_pdf(source, 1, 1, target.page_count)
+            assert target.page_count == 2
+        finally:
+            target.close()
+            source.close()
+
+    def test_insert_preserves_source(self, mutable_pdf_path: Path) -> None:
+        target = PyMuPDFAdapter()
+        source = self._open_source(mutable_pdf_path)
+        try:
+            before = source.page_count
+            target.new_document()
+            target.insert_pdf(source, 0, source.page_count - 1, 0)
+            assert source.page_count == before
+            assert source.is_dirty is False
+        finally:
+            target.close()
+            source.close()
+
+    def test_insert_at_middle_of_existing(self, mutable_pdf_path: Path) -> None:
+        # Insert source pages between existing target pages.
+        target = PyMuPDFAdapter()
+        source = self._open_source(mutable_pdf_path)
+        try:
+            target.new_document()
+            # First fill target with 2 pages from source
+            target.insert_pdf(source, 0, 1, 0)
+            # Now insert a single page at position 1 (between them)
+            target.insert_pdf(source, 2, 2, 1)
+            assert target.page_count == 3
+        finally:
+            target.close()
+            source.close()
+
+    def test_source_not_open_raises(self) -> None:
+        target = PyMuPDFAdapter()
+        unopened = PyMuPDFAdapter()
+        try:
+            target.new_document()
+            with pytest.raises(PageOperationError, match="no open document"):
+                target.insert_pdf(unopened, 0, 0, 0)
+        finally:
+            target.close()
+
+    def test_from_index_out_of_range_raises(self, mutable_pdf_path: Path) -> None:
+        target = PyMuPDFAdapter()
+        source = self._open_source(mutable_pdf_path)
+        try:
+            target.new_document()
+            with pytest.raises(PageOutOfRangeError, match="from_index"):
+                target.insert_pdf(source, 99, 99, 0)
+        finally:
+            target.close()
+            source.close()
+
+    def test_to_index_below_from_raises(self, mutable_pdf_path: Path) -> None:
+        target = PyMuPDFAdapter()
+        source = self._open_source(mutable_pdf_path)
+        try:
+            target.new_document()
+            with pytest.raises(PageOutOfRangeError, match="to_index"):
+                target.insert_pdf(source, 2, 0, 0)
+        finally:
+            target.close()
+            source.close()
+
+    def test_at_index_out_of_range_raises(self, mutable_pdf_path: Path) -> None:
+        target = PyMuPDFAdapter()
+        source = self._open_source(mutable_pdf_path)
+        try:
+            target.new_document()
+            with pytest.raises(PageOutOfRangeError, match="at_index"):
+                target.insert_pdf(source, 0, 0, 99)
+        finally:
+            target.close()
+            source.close()

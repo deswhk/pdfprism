@@ -741,3 +741,305 @@ class TestCloseTabPrompt:
             assert verifier.page_count == 4
         finally:
             verifier.close()
+
+
+class TestCrossDocActionEnablement:
+    def test_all_disabled_empty(self, main_window: MainWindow) -> None:
+        assert main_window.act_extract_pages.isEnabled() is False
+        assert main_window.act_insert_pages.isEnabled() is False
+        assert main_window.act_split.isEnabled() is False
+        assert main_window.act_merge.isEnabled() is False
+
+    def test_extract_insert_split_enabled_with_one_tab(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        assert main_window.act_extract_pages.isEnabled() is True
+        assert main_window.act_insert_pages.isEnabled() is True
+        assert main_window.act_split.isEnabled() is True
+
+    def test_merge_disabled_with_one_tab(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        assert main_window.act_merge.isEnabled() is False
+
+    def test_merge_enabled_with_two_tabs(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        import shutil
+
+        second = tmp_path / "second.pdf"
+        shutil.copy(mutable_pdf_path, second)
+        main_window._open_path(mutable_pdf_path)
+        main_window._open_path(second)
+        assert main_window.act_merge.isEnabled() is True
+
+
+class TestExtractPagesAction:
+    def test_extract_writes_file(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QDialog
+
+        out = tmp_path / "extracted.pdf"
+
+        def patch_exec(self):
+            self._output_edit.setText(str(out))
+            self._from_spin.setValue(1)
+            self._to_spin.setValue(2)
+            return QDialog.DialogCode.Accepted
+
+        from pdfprism.ui.dialogs.extract_pages import ExtractPagesDialog
+
+        monkeypatch.setattr(ExtractPagesDialog, "exec", patch_exec)
+        main_window._open_path(mutable_pdf_path)
+        main_window._on_extract_pages()
+        assert out.exists()
+
+    def test_extract_does_not_dirty_source(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui.dialogs.extract_pages import ExtractPagesDialog
+
+        out = tmp_path / "extracted.pdf"
+        monkeypatch.setattr(
+            ExtractPagesDialog,
+            "exec",
+            lambda self: (
+                self._output_edit.setText(str(out)),
+                QDialog.DialogCode.Accepted,
+            )[1],
+        )
+        main_window._open_path(mutable_pdf_path)
+        main_window._on_extract_pages()
+        assert main_window._active_tab.is_modified is False
+
+
+class TestInsertPagesAction:
+    def test_cancelled_file_dialog_is_noop(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        monkeypatch.setattr(
+            QFileDialog,
+            "getOpenFileName",
+            lambda *a, **kw: ("", ""),
+        )
+        main_window._open_path(mutable_pdf_path)
+        before = main_window._active_tab.page_view.page_count
+        main_window._on_insert_pages()
+        assert main_window._active_tab.page_view.page_count == before
+
+    def test_inserts_source_pages_and_dirties(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        import shutil
+
+        from PySide6.QtWidgets import QDialog, QFileDialog
+
+        source = tmp_path / "source.pdf"
+        shutil.copy(mutable_pdf_path, source)
+
+        monkeypatch.setattr(
+            QFileDialog,
+            "getOpenFileName",
+            lambda *a, **kw: (str(source), ""),
+        )
+
+        from pdfprism.ui.dialogs.insert_pages import InsertPagesDialog
+
+        def patch_exec(self):
+            # Default: full source range, position 1 (prepend)
+            self._position_spin.setValue(1)
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(InsertPagesDialog, "exec", patch_exec)
+        main_window._open_path(mutable_pdf_path)
+        before = main_window._active_tab.page_view.page_count
+        main_window._on_insert_pages()
+        # Source has 3 pages; target had 3; now 6.
+        assert main_window._active_tab.page_view.page_count == before + 3
+        assert main_window._active_tab.is_modified is True
+
+    def test_invalid_source_shows_error(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        bad = tmp_path / "not_a_pdf.pdf"
+        bad.write_text("this is not a PDF")
+
+        monkeypatch.setattr(
+            QFileDialog,
+            "getOpenFileName",
+            lambda *a, **kw: (str(bad), ""),
+        )
+        errors: list[str] = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "critical",
+            lambda parent, title, msg, *a, **kw: errors.append(msg),
+        )
+
+        main_window._open_path(mutable_pdf_path)
+        main_window._on_insert_pages()
+        assert any("Cannot open" in e for e in errors)
+
+
+class TestSplitAction:
+    def test_split_writes_files(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        out_dir = tmp_path / "split_out"
+        out_dir.mkdir()
+
+        monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: 0)
+
+        from pdfprism.ui.dialogs.split import SplitDialog
+
+        def patch_exec(self):
+            self._dir_edit.setText(str(out_dir))
+            self._every_spin.setValue(1)  # one PDF per page
+            self._on_accept()
+            return self.result()
+
+        monkeypatch.setattr(SplitDialog, "exec", patch_exec)
+        main_window._open_path(mutable_pdf_path)
+        main_window._on_split()
+        # mutable_pdf_path is the 3-page sample
+        files = sorted(out_dir.glob("*.pdf"))
+        assert len(files) == 3
+
+    def test_split_does_not_dirty_source(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        out_dir = tmp_path / "split_out"
+        out_dir.mkdir()
+        monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: 0)
+
+        from pdfprism.ui.dialogs.split import SplitDialog
+
+        def patch_exec(self):
+            self._dir_edit.setText(str(out_dir))
+            self._every_spin.setValue(2)
+            self._on_accept()
+            return self.result()
+
+        monkeypatch.setattr(SplitDialog, "exec", patch_exec)
+        main_window._open_path(mutable_pdf_path)
+        main_window._on_split()
+        assert main_window._active_tab.is_modified is False
+
+
+class TestMergeAction:
+    def test_merge_with_one_tab_is_noop(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        before = main_window._tab_widget.count()
+        main_window._on_merge()
+        # Nothing happens; no new tab.
+        assert main_window._tab_widget.count() == before
+
+    def test_merge_writes_file_and_opens_new_tab(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        import shutil
+
+        from PySide6.QtWidgets import QDialog
+
+        second = tmp_path / "second.pdf"
+        shutil.copy(mutable_pdf_path, second)
+        merged = tmp_path / "merged.pdf"
+
+        from pdfprism.ui.dialogs.merge import MergeDialog
+
+        def patch_exec(self):
+            self._output_edit.setText(str(merged))
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(MergeDialog, "exec", patch_exec)
+
+        main_window._open_path(mutable_pdf_path)
+        main_window._open_path(second)
+        main_window._on_merge()
+        assert merged.exists()
+        # Merged file should be opened as a new tab (3rd one).
+        assert main_window._tab_widget.count() == 3
+
+    def test_merge_does_not_dirty_sources(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        import shutil
+
+        from PySide6.QtWidgets import QDialog
+
+        second = tmp_path / "second.pdf"
+        shutil.copy(mutable_pdf_path, second)
+        merged = tmp_path / "merged.pdf"
+
+        from pdfprism.ui.dialogs.merge import MergeDialog
+
+        monkeypatch.setattr(
+            MergeDialog,
+            "exec",
+            lambda self: (
+                self._output_edit.setText(str(merged)),
+                QDialog.DialogCode.Accepted,
+            )[1],
+        )
+
+        main_window._open_path(mutable_pdf_path)
+        main_window._open_path(second)
+        main_window._on_merge()
+        # First two tabs (sources) remain clean.
+        assert main_window._tab_widget.widget(0).is_modified is False
+        assert main_window._tab_widget.widget(1).is_modified is False
