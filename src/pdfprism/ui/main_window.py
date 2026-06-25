@@ -563,7 +563,11 @@ class MainWindow(QMainWindow):
             return
         if self._active_tab.page_view.page_count == 0:
             return
-        hits = self._active_tab.search_service.find_all(term)
+        hits = self._active_tab.search_service.find_all(
+            term,
+            case_sensitive=self._search_bar.case_sensitive,
+            whole_word=self._search_bar.whole_word,
+        )
         self._active_tab.search_hits = hits
         self._active_tab.page_view.set_search_hits(hits)
         if hits:
@@ -582,7 +586,12 @@ class MainWindow(QMainWindow):
             if isinstance(tab, DocumentView):
                 adapters.append(tab.adapter)
                 titles.append(tab.path.name)
-        results = SearchService.find_all_across(adapters, term)
+        results = SearchService.find_all_across(
+            adapters,
+            term,
+            case_sensitive=self._search_bar.case_sensitive,
+            whole_word=self._search_bar.whole_word,
+        )
         self._cross_search_results = results
         self._results_panel.set_results(results, titles)
         docs_with_hits = len({r.doc_index for r in results})

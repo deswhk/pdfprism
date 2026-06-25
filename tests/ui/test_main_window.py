@@ -256,3 +256,67 @@ class TestCrossSearch:
         main_window._on_find("Page")
         assert main_window._results_dock.isHidden()
         assert main_window._cross_search_results == []
+
+
+class TestSearchToggles:
+    """Toggles in SearchBar reach the service in both find paths."""
+
+    @staticmethod
+    def _set_case(main_window: MainWindow, on: bool) -> None:
+        main_window._search_bar._case_btn.setChecked(on)
+
+    @staticmethod
+    def _set_whole(main_window: MainWindow, on: bool) -> None:
+        main_window._search_bar._whole_btn.setChecked(on)
+
+    def test_case_sensitive_single_doc_no_match(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        self._set_case(main_window, True)
+        main_window._on_find("page")  # lowercase, fixture has only "Page"
+        assert main_window._active_tab.search_hits == []
+
+    def test_case_sensitive_single_doc_finds_capitalized(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        self._set_case(main_window, True)
+        main_window._on_find("Page")
+        assert len(main_window._active_tab.search_hits) >= 1
+
+    def test_whole_word_single_doc_rejects_substring(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        self._set_whole(main_window, True)
+        main_window._on_find("pdf")  # substring of "pdfprism"
+        assert main_window._active_tab.search_hits == []
+
+    def test_default_substring_finds_pdf(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        """No toggles: pdf-as-substring still matches inside pdfprism."""
+        main_window._open_path(sample_pdf_path)
+        main_window._on_find("pdf")
+        assert len(main_window._active_tab.search_hits) >= 1
+
+    def test_case_sensitive_cross_doc(self, main_window: MainWindow, sample_pdf_path: Path) -> None:
+        """Toggles flow through find_all_across as well."""
+        main_window._open_path(sample_pdf_path)
+        main_window._open_path(sample_pdf_path)
+        TestCrossSearch._enter_all_open(main_window)
+        self._set_case(main_window, True)
+        main_window._on_find("page")  # lowercase
+        assert main_window._cross_search_results == []
+
+    def test_case_sensitive_cross_doc_finds_capitalized(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        main_window._open_path(sample_pdf_path)
+        TestCrossSearch._enter_all_open(main_window)
+        self._set_case(main_window, True)
+        main_window._on_find("Page")
+        assert len(main_window._cross_search_results) >= 2
+        assert {h.doc_index for h in main_window._cross_search_results} == {0, 1}

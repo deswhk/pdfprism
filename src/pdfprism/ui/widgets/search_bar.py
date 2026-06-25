@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QToolButton,
     QWidget,
 )
 
@@ -48,6 +49,19 @@ class SearchBar(QWidget):
         self._input.returnPressed.connect(self._on_return_pressed)
         self._input.installEventFilter(self)
 
+        # Modifier toggles. Acrobat / VS Code convention: small
+        # checkable buttons next to the input. State lives only for the
+        # current session; clear() does not reset them.
+        self._case_btn = QToolButton()
+        self._case_btn.setText("Aa")
+        self._case_btn.setCheckable(True)
+        self._case_btn.setToolTip("Match case")
+
+        self._whole_btn = QToolButton()
+        self._whole_btn.setText("[w]")
+        self._whole_btn.setCheckable(True)
+        self._whole_btn.setToolTip("Whole words")
+
         self._scope_combo = QComboBox()
         self._scope_combo.addItem("Current document", SearchScope.CURRENT)
         self._scope_combo.addItem("All open documents", SearchScope.ALL_OPEN)
@@ -71,6 +85,8 @@ class SearchBar(QWidget):
         self._close_btn.clicked.connect(self.closed)
 
         layout.addWidget(self._input, stretch=1)
+        layout.addWidget(self._case_btn)
+        layout.addWidget(self._whole_btn)
         layout.addWidget(self._scope_combo)
         layout.addWidget(self._prev_btn)
         layout.addWidget(self._next_btn)
@@ -84,6 +100,14 @@ class SearchBar(QWidget):
     @property
     def search_scope(self) -> SearchScope:
         return self._scope_combo.currentData()
+
+    @property
+    def case_sensitive(self) -> bool:
+        return self._case_btn.isChecked()
+
+    @property
+    def whole_word(self) -> bool:
+        return self._whole_btn.isChecked()
 
     def focus_input(self) -> None:
         """Focus the input box and select any existing text."""

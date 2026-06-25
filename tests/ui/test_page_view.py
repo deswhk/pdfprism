@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsRectItem
+from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsPolygonItem
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.types import SearchHit
@@ -192,7 +192,7 @@ class TestHighlights:
         self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
     ) -> None:
         page_view.set_adapter(adapter_with_doc)
-        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
         assert rects == []
 
     def test_set_search_hits_draws_one_per_match(
@@ -204,7 +204,7 @@ class TestHighlights:
             SearchHit(page_index=0, x0=72, y0=150, x1=200, y1=170),
         ]
         page_view.set_search_hits(hits)
-        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
         assert len(rects) == 2
 
     def test_only_current_page_hits_drawn(
@@ -218,7 +218,7 @@ class TestHighlights:
         ]
         page_view.set_search_hits(hits)
         assert page_view.current_page == 0
-        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
         assert len(rects) == 1
 
     def test_navigation_redraws_for_new_page(
@@ -232,7 +232,7 @@ class TestHighlights:
         ]
         page_view.set_search_hits(hits)
         page_view.go_to_page(1)
-        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
         assert len(rects) == 2
 
     def test_set_current_hit_navigates(
@@ -255,8 +255,8 @@ class TestHighlights:
         page_view.set_search_hits(hits)
         page_view.set_current_hit(hits[0])
         rects = sorted(
-            [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)],
-            key=lambda r: r.rect().y(),
+            [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)],
+            key=lambda r: r.boundingRect().y(),
         )
         assert len(rects) == 2
         assert rects[0].brush().color() != rects[1].brush().color()
@@ -268,7 +268,7 @@ class TestHighlights:
         hits = [SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120)]
         page_view.set_search_hits(hits)
         page_view.clear_search()
-        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
         assert rects == []
 
     def test_set_adapter_clears_search(
@@ -278,7 +278,7 @@ class TestHighlights:
         hits = [SearchHit(page_index=0, x0=72, y0=100, x1=200, y1=120)]
         page_view.set_search_hits(hits)
         page_view.set_adapter(adapter_with_doc)  # rebind same adapter
-        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
         assert rects == []
 
 
@@ -330,7 +330,7 @@ class TestViewMode:
             SearchHit(page_index=2, x0=72, y0=100, x1=200, y1=120),
         ]
         page_view.set_search_hits(hits)
-        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsRectItem)]
+        rects = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
         assert len(rects) == 3
 
     def test_set_same_mode_is_noop(
@@ -345,3 +345,72 @@ class TestViewMode:
         with qtbot.waitSignal(page_view.view_mode_changed, timeout=1000) as blocker:
             page_view.set_view_mode(ViewMode.CONTINUOUS)
         assert blocker.args == [ViewMode.CONTINUOUS]
+
+
+class TestQuadHighlights:
+    """When SearchHit.quad is populated (rotated pages), the polygon item
+    uses those four corners verbatim rather than synthesizing an
+    axis-aligned polygon from x0/y0/x1/y1."""
+
+    def test_quad_corners_used_in_polygon(self, page_view, sample_pdf_path):
+        from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
+        from pdfprism.core.types import SearchHit
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(sample_pdf_path)
+        try:
+            page_view.set_adapter(adapter)
+            page_view.go_to_page(0)
+            # Synthetic quad: trapezoid that is clearly non-axis-aligned.
+            quad = ((10.0, 20.0), (110.0, 25.0), (105.0, 60.0), (15.0, 55.0))
+            hit = SearchHit(
+                page_index=0,
+                x0=10.0,
+                y0=20.0,
+                x1=110.0,
+                y1=60.0,
+                quad=quad,
+            )
+            page_view.set_search_hits([hit])
+
+            polys = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
+            assert len(polys) == 1
+            qp = polys[0].polygon()
+            # Four points, each from the synthetic quad scaled by _RENDER_SCALE.
+            from pdfprism.ui.widgets.page_view import _RENDER_SCALE
+
+            expected = [(x * _RENDER_SCALE, y * _RENDER_SCALE) for x, y in quad]
+            got = [(qp.at(i).x(), qp.at(i).y()) for i in range(qp.count())]
+            assert got == expected
+        finally:
+            adapter.close()
+
+    def test_no_quad_falls_back_to_axis_aligned(self, page_view, sample_pdf_path):
+        """quad=None still works -- axis-aligned polygon from bbox."""
+        from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
+        from pdfprism.core.types import SearchHit
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(sample_pdf_path)
+        try:
+            page_view.set_adapter(adapter)
+            page_view.go_to_page(0)
+            hit = SearchHit(
+                page_index=0,
+                x0=10.0,
+                y0=20.0,
+                x1=110.0,
+                y1=60.0,
+                quad=None,
+            )
+            page_view.set_search_hits([hit])
+            polys = [i for i in page_view.scene().items() if isinstance(i, QGraphicsPolygonItem)]
+            assert len(polys) == 1
+            br = polys[0].boundingRect()
+            # Axis-aligned: width/height match the bbox extent
+            from pdfprism.ui.widgets.page_view import _RENDER_SCALE
+
+            assert br.width() == 100.0 * _RENDER_SCALE
+            assert br.height() == 40.0 * _RENDER_SCALE
+        finally:
+            adapter.close()

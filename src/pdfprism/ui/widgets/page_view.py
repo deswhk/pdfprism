@@ -2,18 +2,19 @@
 
 from enum import StrEnum
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QPainter,
     QPen,
+    QPolygonF,
     QResizeEvent,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
-    QGraphicsRectItem,
+    QGraphicsPolygonItem,
     QGraphicsScene,
     QGraphicsView,
     QWidget,
@@ -100,7 +101,7 @@ class PageView(QGraphicsView):
 
         self._search_hits: list[SearchHit] = []
         self._current_hit: SearchHit | None = None
-        self._highlight_items: list[QGraphicsRectItem] = []
+        self._highlight_items: list[QGraphicsPolygonItem] = []
 
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -353,15 +354,28 @@ class PageView(QGraphicsView):
                     continue
                 y_offset = self._page_offsets[hit.page_index]
             color = _HIGHLIGHT_CURRENT if hit == self._current_hit else _HIGHLIGHT_OTHER
-            self._add_highlight_rect(hit, color, y_offset)
+            self._add_highlight_polygon(hit, color, y_offset)
 
-    def _add_highlight_rect(self, hit: SearchHit, color: QColor, y_offset: float) -> None:
-        item = QGraphicsRectItem(
-            hit.x0 * _RENDER_SCALE,
-            hit.y0 * _RENDER_SCALE + y_offset,
-            (hit.x1 - hit.x0) * _RENDER_SCALE,
-            (hit.y1 - hit.y0) * _RENDER_SCALE,
+    def _add_highlight_polygon(self, hit: SearchHit, color: QColor, y_offset: float) -> None:
+        # Build a 4-point polygon in scene coordinates. When the adapter
+        # populated hit.quad (rotated page), use the four corners directly
+        # so the overlay tracks text orientation. Otherwise build an
+        # axis-aligned polygon from the bounding rect -- visually identical
+        # to the legacy QGraphicsRectItem path but going through the same
+        # polygon code path so there is only one renderer to maintain.
+        if hit.quad is not None:
+            corners = hit.quad
+        else:
+            corners = (
+                (hit.x0, hit.y0),
+                (hit.x1, hit.y0),
+                (hit.x1, hit.y1),
+                (hit.x0, hit.y1),
+            )
+        polygon = QPolygonF(
+            [QPointF(x * _RENDER_SCALE, y * _RENDER_SCALE + y_offset) for x, y in corners]
         )
+        item = QGraphicsPolygonItem(polygon)
         item.setBrush(QBrush(color))
         item.setPen(QPen(Qt.PenStyle.NoPen))
         item.setZValue(1.0)

@@ -82,7 +82,7 @@ src/pdfprism/
 │   └── adapters/
 │       └── pymupdf_adapter.py   # Concrete PyMuPDF implementation
 ├── services/                    # Pure-logic operations on documents
-│   ├── search.py                # PR 4/6: per-doc + cross-doc text search; SearchScope enum
+│   ├── search.py                # PR 4/4.5/6: per-doc + cross-doc text search; SearchScope enum
 │   ├── pages.py                 # PR 8: rotate, delete, insert, reorder, etc.
 │   ├── security.py              # PR 10: password, permissions, sanitize
 │   ├── redaction.py             # PR 11: true content removal
@@ -333,24 +333,40 @@ single-doc cursor *delegation* but the actual cursor (`search_hits`,
 `current_hit_index`) lives on the active `DocumentView`, so each tab's
 search state survives tab switches.
 
-`SearchService.find_all(term)` walks the document via the adapter and
-returns a flat list of `SearchHit`s in page order. The service is thin
-today because the adapter's `search_page` already does the per-page work;
-the layer exists because the planned PR 4.5 adds case-sensitive and
-whole-word matching by extracting `page.get_text("words")` and filtering
-rect-by-rect, which is a service concern (operates above the adapter's
-native call) not an adapter concern.
+`SearchService.find_all(term, *, case_sensitive=False, whole_word=False)`
+walks the document via the adapter and returns a flat list of `SearchHit`s
+in page order. Two paths:
 
-`SearchBar` (`QLineEdit` + scope dropdown + Prev/Next buttons + match
-counter + close button) is a pure UI shell. It emits `find_requested(str)`
-on Enter (with whitespace stripped), `next_requested` and `prev_requested`
-on its buttons, and `closed` on the X button or Escape. It does not know
-about documents, services, or page views.
+- **Fast path** (both flags off, default): delegates to
+  `DocumentAdapter.search_page`, which uses PyMuPDF's native search with
+  `quads=True`.
+- **Slow path** (either flag on): iterates `DocumentAdapter.extract_words`
+  and filters in Python. Hits cover whole words even when the term is a
+  substring. Filtering above the adapter is a service concern -- the
+  same Python logic works against any future adapter without per-engine
+  reimplementation, which is exactly why `extract_words` is a Protocol
+  method rather than a service-internal call to `pymupdf` directly.
+
+Cross-document search (`find_all_across`) accepts the same kwargs and
+passes them through to per-doc search, so toggle behavior is identical
+in both scopes.
+
+`SearchBar` (`QLineEdit` + `Aa` / `[w]` toggle buttons + scope dropdown
++ Prev/Next buttons + match counter + close button) is a pure UI shell.
+It emits `find_requested(str)` on Enter (with whitespace stripped),
+`next_requested` and `prev_requested` on its buttons, and `closed` on
+the X button or Escape. The toggle state is exposed via the
+`case_sensitive` and `whole_word` properties; MainWindow reads them at
+find time and passes them through to `SearchService`. `clear()` empties
+the input and counter but deliberately leaves the toggles and scope
+alone -- they describe how the user wants to search, not what they
+searched for last. The widget does not know about documents, services,
+or page views.
 
 `PageView` exposes `set_search_hits(list[SearchHit])`, `set_current_hit(
 SearchHit | None)`, and `clear_search()`. The hits are stashed in state;
 when the view renders any page, it filters hits to that page and draws
-each as a translucent `QGraphicsRectItem` on the scene at z-value 1
+each as a translucent `QGraphicsPolygonItem` on the scene at z-value 1
 (above the cached pixmap). Yellow for non-current hits, orange for the
 one `set_current_hit` points to. Because the highlights are scene
 overlays rather than baked into the pixmap, the `PageCache` is never
@@ -373,13 +389,35 @@ scrolls the current hit into the viewport.
 **Shortcuts** come from `QKeySequence.StandardKey`: `Ctrl+F` (Find),
 `F3` (FindNext), `Shift+F3` (FindPrevious) on Windows/Linux.
 
-**Known limitation.** PyMuPDF's `Page.search_for` returns rects in
-*unrotated* page coordinates. On pages with non-zero rotation, the
-highlight overlays will be misaligned with the rendered text. The fix is
-to pass `quads=True` and project the resulting `Quad` objects through the
-page's rotation transform. Tracked as a PR 4.5 candidate alongside
-case-sensitive and whole-word matching, since all three need
-above-adapter manipulation of PyMuPDF text data.
+**Rotation handling.** PyMuPDF returns search rects and word rects in
+*unrotated* page coordinates. The rendered pixmap is in *layout*
+(rotated) coordinates, so without projection the overlays land where
+the text would be if the page weren't rotated. The adapter projects
+quads (in `search_page`) and word rects (in `extract_words`) through
+`page.rotation_matrix` on rotated pages so overlays track the
+displayed glyphs.
+
+Empirical note worth keeping: in PyMuPDF 1.26, it is `rotation_matrix`
+that maps unrotated -> layout, despite the docstring wording.
+`derotation_matrix` goes the other way. If a future PyMuPDF version
+swaps these conventions, the `TestRotationProjection` tests in
+`test_pymupdf_adapter.py` will fire and tell us to flip the matrix.
+
+Search hits carry an optional `quad: Quad | None` field. The adapter
+populates it only on rotated pages (axis-aligned hits on rotation-0
+pages leave it `None` since the bounding rect already describes the
+shape). `PageView` builds its `QGraphicsPolygonItem` from `quad` when
+present and from the four bbox corners otherwise -- one rendering path,
+no special-casing.
+
+**Known limitation.** `extract_words` (used by the slow path for
+case-sensitive and whole-word search) projects only the axis-aligned
+bounding rect of each word, since `get_text("words")` does not expose
+quads. On rotated pages, slow-path hits therefore use rectangular
+highlights aligned to the layout axes rather than tight quads around
+rotated glyphs. The combination of rotated content + case-sensitive or
+whole-word search is rare; the loss is cosmetic, and the fast path on
+the same content does get proper quads.
 
 ## Cross-document Search
 
@@ -582,6 +620,16 @@ merges via PR review and CI on green.
 - **PR 4: In-document text search.** `SearchHit` type, `search_page` on the
   Protocol, `SearchService`. `SearchBar` with Ctrl+F / F3 / Shift+F3.
   `PageView` translucent overlay highlights.
+- **PR 4.5: Search hardening.** Case-sensitive and whole-word toggles
+  in `SearchBar` (`Aa` / `[w]` buttons), flowing through to a new
+  service slow path that filters via `DocumentAdapter.extract_words`.
+  Adapter `search_page` now uses `quads=True` and projects results
+  through `page.rotation_matrix` so highlights track text on rotated
+  pages. `SearchHit` gains an optional `quad` field; `PageView` switches
+  to `QGraphicsPolygonItem` so quad-shaped overlays render correctly
+  with no special-casing. New `Word` type on `core/types.py` and a new
+  `extract_words` method on the Protocol -- a primitive PR 7 will
+  reuse.
 - **PR 5: View modes, full-screen, dark mode, recent files.** `ViewMode`
   enum and continuous-scroll layout in `PageView`; F11 full-screen with
   state save/restore; manual dark mode via `ui/theme.py` (`DARK_QSS`),
