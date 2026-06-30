@@ -99,6 +99,8 @@ class MainWindow(QMainWindow):
         self._thumbnail_stack = QStackedWidget(self)
         self._thumbnail_stack.addWidget(QWidget(self))
         self._outline_stack = QStackedWidget(self)
+        self._organize_stack = QStackedWidget(self)
+        self._organize_stack.addWidget(QWidget(self))
         self._outline_stack.addWidget(QWidget(self))
 
         self._thumbnail_dock = self._make_dock("Thumbnails", self._thumbnail_stack)
@@ -107,6 +109,12 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._outline_dock)
         self.tabifyDockWidget(self._thumbnail_dock, self._outline_dock)
         self._thumbnail_dock.raise_()
+
+        # Organize Pages dock (right by default, hidden by default; F6
+        # toggle). Power-user surface for multi-select + drag-reorder.
+        self._organize_dock = self._make_dock("Organize Pages", self._organize_stack)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._organize_dock)
+        self._organize_dock.setVisible(False)
 
         # Cross-search results dock (right); auto-shown on cross-search,
         # auto-hidden on close-search or when a single-doc search runs.
@@ -360,6 +368,9 @@ class MainWindow(QMainWindow):
         self.act_toggle_thumbnails.setShortcut("F4")
 
         self.act_toggle_outline = self._outline_dock.toggleViewAction()
+        self.act_toggle_organize = self._organize_dock.toggleViewAction()
+        self.act_toggle_organize.setText("&Organize Pages")
+        self.act_toggle_organize.setShortcut("F6")
         self.act_toggle_outline.setText("&Outline")
         self.act_toggle_outline.setShortcut("F5")
 
@@ -407,6 +418,7 @@ class MainWindow(QMainWindow):
             self.act_zoom_out,
             self.act_toggle_thumbnails,
             self.act_toggle_outline,
+            self.act_toggle_organize,
         ]:
             self.addAction(action)
 
@@ -463,6 +475,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.act_toggle_thumbnails)
         view_menu.addAction(self.act_toggle_outline)
+        view_menu.addAction(self.act_toggle_organize)
         view_menu.addSeparator()
         view_menu.addAction(self.act_fullscreen)
         view_menu.addAction(self.act_toggle_dark_mode)
@@ -509,6 +522,7 @@ class MainWindow(QMainWindow):
         # to find the panels already in the stacks to make them current.
         self._thumbnail_stack.addWidget(doc_view.thumbnail_panel)
         self._outline_stack.addWidget(doc_view.outline_panel)
+        self._organize_stack.addWidget(doc_view.organize_panel)
         tab_idx = self._tab_widget.addTab(doc_view, doc_view.path.name)
         self._tab_widget.setTabToolTip(tab_idx, str(doc_view.path))
         doc_view.modified_changed.connect(
@@ -529,6 +543,7 @@ class MainWindow(QMainWindow):
             self._clear_cross_search()
         self._thumbnail_stack.removeWidget(doc_view.thumbnail_panel)
         self._outline_stack.removeWidget(doc_view.outline_panel)
+        self._organize_stack.removeWidget(doc_view.organize_panel)
         self._tab_widget.removeTab(index)
         doc_view.close_document()
         doc_view.thumbnail_panel.deleteLater()
@@ -559,6 +574,9 @@ class MainWindow(QMainWindow):
         thumb_idx = self._thumbnail_stack.indexOf(doc_view.thumbnail_panel)
         if thumb_idx >= 0:
             self._thumbnail_stack.setCurrentIndex(thumb_idx)
+        organize_idx = self._organize_stack.indexOf(doc_view.organize_panel)
+        if organize_idx >= 0:
+            self._organize_stack.setCurrentIndex(organize_idx)
         outline_idx = self._outline_stack.indexOf(doc_view.outline_panel)
         if outline_idx >= 0:
             self._outline_stack.setCurrentIndex(outline_idx)
@@ -589,6 +607,7 @@ class MainWindow(QMainWindow):
         self._stacked_central.setCurrentIndex(0)
         self._thumbnail_stack.setCurrentIndex(0)
         self._outline_stack.setCurrentIndex(0)
+        self._organize_stack.setCurrentIndex(0)
         self.setWindowTitle("pdfprism")
         if self._search_toolbar.isVisible():
             self._on_close_search()
@@ -932,6 +951,7 @@ class MainWindow(QMainWindow):
                 "statusbar": self.statusBar().isVisible(),
                 "thumbnail_dock": self._thumbnail_dock.isVisible(),
                 "outline_dock": self._outline_dock.isVisible(),
+                "organize_dock": self._organize_dock.isVisible(),
                 "results_dock": self._results_dock.isVisible(),
                 "tab_bar": self._tab_widget.tabBar().isVisible(),
             }
@@ -942,6 +962,7 @@ class MainWindow(QMainWindow):
             self.statusBar().setVisible(False)
             self._thumbnail_dock.setVisible(False)
             self._outline_dock.setVisible(False)
+            self._organize_dock.setVisible(False)
             self._results_dock.setVisible(False)
             self._tab_widget.tabBar().setVisible(False)
             self.showFullScreen()
@@ -955,6 +976,7 @@ class MainWindow(QMainWindow):
             self.statusBar().setVisible(state["statusbar"])
             self._thumbnail_dock.setVisible(state["thumbnail_dock"])
             self._outline_dock.setVisible(state["outline_dock"])
+            self._organize_dock.setVisible(state.get("organize_dock", False))
             self._results_dock.setVisible(state["results_dock"])
             self._tab_widget.tabBar().setVisible(state["tab_bar"])
             self._fullscreen_state = None

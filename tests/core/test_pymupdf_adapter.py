@@ -427,6 +427,15 @@ class TestDuplicatePage:
         with pytest.raises(PageOutOfRangeError):
             mutable_adapter.duplicate_page(99)
 
+    def test_duplicate_last_page(self, mutable_adapter, sample_pdf_path) -> None:
+        # Regression: PyMuPDF rejects fullcopy_page(N, N+1) when N+1 ==
+        # page_count. The adapter uses target=-1 (append) in that case.
+        a = mutable_adapter
+        a.open(sample_pdf_path)
+        last = a.page_count - 1
+        a.duplicate_page(last)
+        assert a.page_count == 4
+
 
 class TestMovePage:
     def test_forward_move_to_end(self, mutable_adapter: PyMuPDFAdapter) -> None:

@@ -304,7 +304,13 @@ class PyMuPDFAdapter:
             )
         # PyMuPDF's fullcopy_page copies the source page to a destination
         # index; passing the source index + 1 inserts the copy right after.
-        self._doc.fullcopy_page(index, index + 1)
+        if index == self._doc.page_count - 1:
+            # PyMuPDF rejects fullcopy_page(N, N+1) when N+1 == page_count;
+            # use -1 to append the copy at the end (semantically identical
+            # to inserting after the last page).
+            self._doc.fullcopy_page(index, -1)
+        else:
+            self._doc.fullcopy_page(index, index + 1)
         self._is_dirty = True
 
     def move_page(self, from_index: int, to_index: int) -> None:

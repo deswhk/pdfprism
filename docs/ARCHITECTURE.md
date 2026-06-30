@@ -791,6 +791,106 @@ alongside the single-doc ones. Inches/mm unit conversion for crop
 is also a PR 9 candidate. Customizable filename patterns for
 split outputs are deferred indefinitely.
 
+## Organize Pages Panel
+
+PR 9 adds the rich page-editing surface that PR 8 (single-doc
+operations via menu) and PR 8.5 (cross-doc operations via menu)
+set up. The panel is a dockable widget on the right of the main
+window, hidden by default, toggled with F6.
+
+**Composition.** Two classes in ``ui/widgets/organize_panel.py``:
+
+- ``OrganizePanel`` (``QListView``) is the bare grid -- ``IconMode``
+  + ``LeftToRight`` flow + ``Wrapping`` for the grid layout,
+  ``ExtendedSelection`` for Ctrl/Shift multi-select. Custom
+  ``OrganizeModel`` (``QAbstractListModel``) feeds pixmaps from the
+  shared ``PageCache``; near-identical to ``ThumbnailModel`` but
+  not shared because the selection and drag semantics diverge.
+- ``OrganizePagesPanel`` (``QWidget``) is the composite that
+  MainWindow docks: a ``QToolBar`` of selection-aware actions, the
+  ``OrganizePanel`` grid, and a status ``QLabel`` showing the
+  selection count. It re-emits the grid's operation signals so
+  consumers don't reach into ``._grid``.
+
+**Signal-based operation contract.** The panel never touches the
+adapter directly. It emits intent signals -- ``rotate_requested
+(indices, degrees)``, ``delete_requested(indices)``,
+``duplicate_requested(indices)``, ``move_requested(from, to)`` --
+and ``DocumentView`` owns the mutation. This keeps the panel
+ignorant of adapters and consistent with PR 8/8.5's discipline:
+every page mutation goes through ``DocumentView`` so the cache
+clears, every panel re-binds, and the dirty flag refreshes in one
+place.
+
+**Drag-to-reorder.** PR 9 ships single-page drag only. We deliberately
+use ``DragDropMode.DragDrop`` (not ``InternalMove``) and override
+``dropEvent`` to capture the drop position, emit ``move_requested``,
+and call ``event.ignore()`` so Qt never moves a row in its own
+model. The host owns the mutation through the adapter; the panel
+is re-bound afterwards. Single source of truth.
+
+Translating Qt's drop indicator semantics to PR 8's
+``DocumentView.move_page(from, to)`` contract needs care because
+Qt's ``dest_row`` uses insertion-position semantics while
+``move_page``'s ``to_index`` is the post-removal target:
+
+- Forward move (``from < dest``): ``to = dest - 1``
+- Backward move (``from > dest``): ``to = dest``
+- ``from == dest``: no-op
+
+The translation is captured in ``OrganizePanel._qt_drop_to_move_page``
+and verified by ``TestDropTranslation``; the actual semantics were
+found empirically against Qt 6.11.
+
+**Multi-select operations.** ``DocumentView`` exposes three new
+slots wired to the panel's request signals:
+
+- ``_on_organize_rotate(indices, degrees)`` -- loop ``rotate_page``,
+  rebind once at end. Order doesn't matter for rotation.
+- ``_on_organize_delete(indices)`` -- delegates to ``delete_pages``
+  which already takes a list (PR 8 primitive).
+- ``_on_organize_duplicate(indices)`` -- loop ``duplicate_page``
+  in **reverse** index order so earlier indices stay valid as we
+  insert copies.
+
+Each slot ends with the standard cache-clear + thumbnail-rebind +
+organize-rebind + page-view-rebind + ``_refresh_modified`` dance,
+matching PR 8's seven page-op proxies (which were also extended to
+re-bind the organize panel).
+
+**Widget-scoped keyboard shortcuts.** The panel's toolbar actions
+carry shortcuts with ``Qt.ShortcutContext.WidgetWithChildrenShortcut``:
+Ctrl+R rotates the selection right, Ctrl+Shift+R rotates left,
+Delete deletes, Ctrl+D duplicates, Ctrl+A selects all. Crucially,
+Ctrl+R also exists at the MainWindow scope (PR 8: rotate the
+**current** page). When the panel has focus, Qt's shortcut
+disambiguation routes Ctrl+R to the widget-scope action (rotate
+**selection**); when the page view is focused, the MainWindow
+action fires. Same keystroke, contextually scoped behaviour --
+"rotate whatever you're looking at".
+
+**Per-tab ownership.** Following the established pattern from
+``ThumbnailPanel`` and ``OutlinePanel``, each ``DocumentView``
+owns its own ``OrganizePagesPanel`` instance. MainWindow holds a
+``QStackedWidget`` (``_organize_stack``) inside the dock; on tab
+switch we ``setCurrentWidget`` to the active tab's panel. On open,
+we ``addWidget``; on close, ``removeWidget``. When no tabs are
+open, the stack shows a placeholder ``QWidget`` (index 0).
+
+**Session persistence.** Visibility of the organize dock is saved
+in the per-tab session state alongside the thumbnail and outline
+dock visibilities. On session restore we read with
+``state.get("organize_dock", False)`` so older session files
+without the key default to hidden (the new feature's default).
+
+**Deferred to PR 9.5.** Multi-page drag, crop on selection (the
+headline of PR 9.5 is the live crop preview), extract selection to
+file (needs non-contiguous design decision), external file drag
+(drop a PDF from Explorer to insert pages). The PR 9 design
+anticipates these extensions: the toolbar add pattern is uniform,
+``selected_indices`` is the universal selection getter, and the
+request-signal contract scales without changes.
+
 ## Theme
 
 `pdfprism.ui.theme.DARK_QSS` is a Qt Style Sheet (QSS) string applied
@@ -997,8 +1097,12 @@ merges via PR review and CI on green.
   Four new dialogs (``ExtractPagesDialog``, ``InsertPagesDialog``,
   ``SplitDialog``, ``MergeDialog``) and a File → Pages submenu
   surface them.
-- PR 9: "Organize Pages" UI (drag-reorder, multi-select, live crop
-  preview).
+- **PR 9: Organize Pages UI.** New ``OrganizePagesPanel`` dock
+  (right side, F6 toggle, hidden by default) with grid view,
+  multi-select, drag-to-reorder, and selection-aware operations
+  (rotate / delete / duplicate). Per-tab ownership pattern
+  matching ``ThumbnailPanel`` and ``OutlinePanel``. Crop preview
+  and multi-select crop/extract deferred to PR 9.5.
 
 ### Milestone 4 — Security & OCR
 

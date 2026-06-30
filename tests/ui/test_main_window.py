@@ -1043,3 +1043,66 @@ class TestMergeAction:
         # First two tabs (sources) remain clean.
         assert main_window._tab_widget.widget(0).is_modified is False
         assert main_window._tab_widget.widget(1).is_modified is False
+
+
+class TestOrganizeDock:
+    def test_dock_hidden_by_default(self, main_window: MainWindow) -> None:
+        assert main_window._organize_dock.isVisible() is False
+
+    def test_toggle_shortcut_is_f6(self, main_window: MainWindow) -> None:
+        from PySide6.QtGui import QKeySequence
+
+        assert main_window.act_toggle_organize.shortcut() == QKeySequence("F6")
+
+    def test_toggle_shows_dock(self, main_window: MainWindow) -> None:
+        main_window.show()
+        main_window.act_toggle_organize.trigger()
+        assert main_window._organize_dock.isVisible() is True
+
+    def test_organize_action_in_view_menu(self, main_window: MainWindow) -> None:
+        # The act_toggle_organize action should belong to the View menu.
+        menubar = main_window.menuBar()
+        for ma in menubar.actions():
+            if "View" not in ma.text():
+                continue
+            view_menu = ma.menu()
+            assert main_window.act_toggle_organize in view_menu.actions()
+            return
+        raise AssertionError("View menu not found")
+
+
+class TestOrganizePanelPerTabSwap:
+    def test_active_tabs_organize_panel_in_stack(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        active = main_window._active_tab
+        assert main_window._organize_stack.currentWidget() is active.organize_panel
+
+    def test_switching_tabs_swaps_organize_panel(
+        self, main_window: MainWindow, mutable_pdf_path: Path, tmp_path: Path
+    ) -> None:
+        import shutil
+
+        second = tmp_path / "second.pdf"
+        shutil.copy(mutable_pdf_path, second)
+
+        main_window._open_path(mutable_pdf_path)
+        main_window._open_path(second)
+        # Active tab is now the second one
+        second_tab = main_window._active_tab
+        assert main_window._organize_stack.currentWidget() is second_tab.organize_panel
+
+        # Switch back to first tab
+        main_window._tab_widget.setCurrentIndex(0)
+        first_tab = main_window._tab_widget.widget(0)
+        assert main_window._organize_stack.currentWidget() is first_tab.organize_panel
+
+    def test_closing_last_tab_resets_stack(
+        self, main_window: MainWindow, mutable_pdf_path: Path
+    ) -> None:
+        main_window._open_path(mutable_pdf_path)
+        # Close the only tab via the tab-close signal.
+        main_window._on_tab_close_requested(0)
+        # Stack should be back to the placeholder (index 0)
+        assert main_window._organize_stack.currentIndex() == 0
