@@ -29,6 +29,7 @@ from pdfprism.services.extract import ExtractService
 from pdfprism.services.pages import PageService
 from pdfprism.services.pages import merge as merge_documents
 from pdfprism.services.search import SearchScope, SearchService
+from pdfprism.ui.dialogs.about import AboutDialog
 from pdfprism.ui.dialogs.crop import CropDialog
 from pdfprism.ui.dialogs.extract import ExtractDialog, ExtractKind
 from pdfprism.ui.dialogs.extract_pages import ExtractPagesDialog
@@ -371,6 +372,9 @@ class MainWindow(QMainWindow):
         self.act_toggle_organize = self._organize_dock.toggleViewAction()
         self.act_toggle_organize.setText("&Organize Pages")
         self.act_toggle_organize.setShortcut("F6")
+
+        self.act_about = QAction("&About pdfprism", self)
+        self.act_about.triggered.connect(self._on_about)
         self.act_toggle_outline.setText("&Outline")
         self.act_toggle_outline.setShortcut("F5")
 
@@ -419,6 +423,7 @@ class MainWindow(QMainWindow):
             self.act_toggle_thumbnails,
             self.act_toggle_outline,
             self.act_toggle_organize,
+            self.act_about,
         ]:
             self.addAction(action)
 
@@ -476,6 +481,9 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.act_toggle_thumbnails)
         view_menu.addAction(self.act_toggle_outline)
         view_menu.addAction(self.act_toggle_organize)
+
+        help_menu = menubar.addMenu("&Help")
+        help_menu.addAction(self.act_about)
         view_menu.addSeparator()
         view_menu.addAction(self.act_fullscreen)
         view_menu.addAction(self.act_toggle_dark_mode)
@@ -1210,6 +1218,10 @@ class MainWindow(QMainWindow):
         clear_action = QAction("Clear Recent", self._recent_menu)
         clear_action.triggered.connect(self._clear_recent_files)
         self._recent_menu.addAction(clear_action)
+
+    def _on_about(self) -> None:
+        """Help -> About slot: show the modal About dialog."""
+        AboutDialog(self).exec()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         for i in range(self._tab_widget.count()):

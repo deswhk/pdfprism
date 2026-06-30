@@ -45,10 +45,9 @@ dev = [
 pdfprism = "pdfprism.app:main"
 
 [project.urls]
-# Update these once the repo flips public.
-# Homepage = "https://github.com/deswhk/pdfprism"
-# Repository = "https://github.com/deswhk/pdfprism.git"
-# Issues = "https://github.com/deswhk/pdfprism/issues"
+Homepage = "https://github.com/deswhk/pdfprism"
+Repository = "https://github.com/deswhk/pdfprism.git"
+Issues = "https://github.com/deswhk/pdfprism/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

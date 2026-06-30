@@ -1,0 +1,55 @@
+﻿pdfprism
+========
+
+Copyright (c) 2026 deswhk
+
+This software is licensed under the GNU Affero General Public License,
+version 3 (AGPL-3.0). The full text of the license is in the LICENSE
+file at the root of this distribution.
+
+Source code: https://github.com/deswhk/pdfprism
+
+WARRANTY DISCLAIMER
+-------------------
+
+This software is provided "AS IS", without warranty of any kind,
+express or implied, including but not limited to the warranties of
+merchantability, fitness for a particular purpose, and noninfringement.
+In no event shall the authors or copyright holders be liable for any
+claim, damages, or other liability, whether in an action of contract,
+tort, or otherwise, arising from, out of, or in connection with this
+software or the use or other dealings in this software. See sections
+15-17 of the AGPL-3.0 license text in LICENSE for the formal disclaimer
+and limitation of liability.
+
+Test on copies. Back up important files before performing destructive
+operations. The authors do not accept responsibility for data loss.
+
+THIRD-PARTY COMPONENTS
+----------------------
+
+pdfprism uses the following third-party libraries at runtime:
+
+  PyMuPDF
+    Copyright (c) Artifex Software, Inc.
+    Licensed under AGPL-3.0
+    https://github.com/pymupdf/PyMuPDF
+
+  PySide6 (with PySide6-Essentials, PySide6-Addons) and shiboken6
+    Copyright (c) The Qt Company Ltd.
+    Licensed under LGPL-3.0
+    https://www.qt.io/qt-for-python
+
+Each component is distributed under its own license. Their source
+code and full license texts are available at the upstream URLs above.
+
+The combined work (pdfprism plus PyMuPDF) is distributed under
+AGPL-3.0 in accordance with PyMuPDF's licensing terms. Commercial
+licensing of PyMuPDF is available separately from Artifex Software,
+which would permit non-AGPL distribution of derivative works.
+
+REPORTING ISSUES
+----------------
+
+Bug reports, feature requests, and questions:
+https://github.com/deswhk/pdfprism/issues

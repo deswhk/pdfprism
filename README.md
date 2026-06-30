@@ -6,7 +6,7 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 ## Status
 
-Under active development. Milestone 1 (Reader Core) is the current focus; see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full 15-PR roadmap.
+Under active development. Milestones 1–3 are shipped (PR 1 through PR 9); Milestone 4 (security, OCR) is up next. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
 
 **What works today (through PR 9):**
 
@@ -129,4 +129,4 @@ For the design rationale, layered architecture, the `DocumentAdapter` Protocol, 
 
 ## License
 
-[AGPL-3.0](./LICENSE). This project depends on PyMuPDF, which is AGPL, so derivative works must also be AGPL.
+[AGPL-3.0](./LICENSE). This project depends on [PyMuPDF](https://github.com/pymupdf/PyMuPDF) which is AGPL-licensed, so derivative works must also be AGPL. (PyMuPDF is dual-licensed by Artifex Software; commercial licensing is available separately if you need to distribute under different terms.) See [`NOTICE.txt`](./NOTICE.txt) for full third-party notices and the warranty disclaimer.
