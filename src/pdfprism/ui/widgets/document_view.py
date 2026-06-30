@@ -18,6 +18,7 @@ from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.types import SearchHit
 from pdfprism.services.search import SearchService
 from pdfprism.ui.page_cache import PageCache
+from pdfprism.ui.widgets.organize_panel import OrganizePagesPanel
 from pdfprism.ui.widgets.outline_panel import OutlinePanel
 from pdfprism.ui.widgets.page_view import PageView, ViewMode
 from pdfprism.ui.widgets.thumbnail_panel import ThumbnailPanel
@@ -53,6 +54,7 @@ class DocumentView(QWidget):
         self._page_view = PageView(self._page_cache, self)
         self._thumbnail_panel = ThumbnailPanel(self._page_cache, self)
         self._outline_panel = OutlinePanel(self)
+        self._organize_panel = OrganizePagesPanel(self._page_cache, self)
         self._search_service = SearchService(self._adapter)
 
         # Per-tab search cursor state.
@@ -74,6 +76,16 @@ class DocumentView(QWidget):
         self._outline_panel.page_selected.connect(self._page_view.go_to_page)
         self._page_view.page_changed.connect(self._thumbnail_panel.set_current_page)
 
+        # OrganizePagesPanel: panel emits intent, we route through the
+        # corresponding mutation methods. Each one already does the
+        # adapter mutation + cache clear + panel re-bind + modified-
+        # state refresh, so panel + thumbnails + page view all stay
+        # in sync after any organize-driven change.
+        self._organize_panel.rotate_requested.connect(self._on_organize_rotate)
+        self._organize_panel.delete_requested.connect(self._on_organize_delete)
+        self._organize_panel.duplicate_requested.connect(self._on_organize_duplicate)
+        self._organize_panel.move_requested.connect(self.move_page)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._page_view)
@@ -83,6 +95,7 @@ class DocumentView(QWidget):
         self._adapter.open(self._path)
         self._page_view.set_adapter(self._adapter)
         self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
         self._outline_panel.set_outline(self._adapter.get_outline())
 
     def close_document(self) -> None:
@@ -93,6 +106,7 @@ class DocumentView(QWidget):
         """
         self._page_view.clear()
         self._thumbnail_panel.set_adapter(None)
+        self._organize_panel.set_adapter(None)
         self._outline_panel.set_outline([])
         self._adapter.close()
         self._page_cache.clear()
@@ -115,6 +129,10 @@ class DocumentView(QWidget):
     @property
     def thumbnail_panel(self) -> ThumbnailPanel:
         return self._thumbnail_panel
+
+    @property
+    def organize_panel(self) -> OrganizePagesPanel:
+        return self._organize_panel
 
     @property
     def outline_panel(self) -> OutlinePanel:
@@ -148,6 +166,7 @@ class DocumentView(QWidget):
         self._adapter.rotate_page(index, degrees)
         self._page_cache.clear()
         self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
 
@@ -155,6 +174,7 @@ class DocumentView(QWidget):
         self._adapter.delete_pages(indices)
         self._page_cache.clear()
         self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
 
@@ -162,6 +182,7 @@ class DocumentView(QWidget):
         self._adapter.insert_blank_page(index, width, height)
         self._page_cache.clear()
         self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
 
@@ -169,6 +190,7 @@ class DocumentView(QWidget):
         self._adapter.duplicate_page(index)
         self._page_cache.clear()
         self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
 
@@ -176,6 +198,7 @@ class DocumentView(QWidget):
         self._adapter.move_page(from_index, to_index)
         self._page_cache.clear()
         self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
 
@@ -187,6 +210,7 @@ class DocumentView(QWidget):
         self._adapter.crop_page(index, margins)
         self._page_cache.clear()
         self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
 
@@ -203,6 +227,33 @@ class DocumentView(QWidget):
         PageService(self._adapter).insert_from(source_path, from_index, to_index, at_index)
         self._page_cache.clear()
         self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    # ---- Organize-panel handlers (PR 9) ----------------------------
+
+    def _on_organize_rotate(self, indices: list[int], degrees: int) -> None:
+        """Rotate each indexed page; order does not matter for rotation."""
+        for i in indices:
+            self._adapter.rotate_page(i, degrees)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def _on_organize_delete(self, indices: list[int]) -> None:
+        """Delete the selected pages (adapter primitive takes a list)."""
+        self.delete_pages(indices)
+
+    def _on_organize_duplicate(self, indices: list[int]) -> None:
+        """Duplicate each selected page; iterate in reverse so indices stay valid."""
+        for i in sorted(indices, reverse=True):
+            self._adapter.duplicate_page(i)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
 

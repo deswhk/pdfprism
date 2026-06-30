@@ -174,3 +174,62 @@ class TestDocumentViewSave:
         assert mutable_view.path == new_path
         assert new_path.exists()
         assert mutable_view.is_modified is False
+
+
+class TestOrganizePanelOwnership:
+    def test_document_view_exposes_organize_panel(self, sample_pdf_path: Path, qtbot) -> None:
+        from pdfprism.ui.widgets.organize_panel import OrganizePagesPanel
+
+        dv = DocumentView(sample_pdf_path)
+        qtbot.addWidget(dv)
+        assert isinstance(dv.organize_panel, OrganizePagesPanel)
+
+    def test_open_binds_organize_panel(self, sample_pdf_path: Path, qtbot) -> None:
+        dv = DocumentView(sample_pdf_path)
+        qtbot.addWidget(dv)
+        dv.open()
+        # sample.pdf has 3 pages -> grid should have 3 rows
+        assert dv.organize_panel._grid._model.rowCount() == 3
+
+
+class TestOrganizePanelSyncAfterMutation:
+    def test_rotate_updates_organize_panel(self, mutable_view: DocumentView) -> None:
+        # Rotate should not change page count
+        mutable_view.rotate_page(0, 90)
+        assert mutable_view.organize_panel._grid._model.rowCount() == 3
+
+    def test_delete_updates_organize_panel(self, mutable_view: DocumentView) -> None:
+        mutable_view.delete_pages([0])
+        assert mutable_view.organize_panel._grid._model.rowCount() == 2
+
+    def test_duplicate_updates_organize_panel(self, mutable_view: DocumentView) -> None:
+        mutable_view.duplicate_page(1)
+        assert mutable_view.organize_panel._grid._model.rowCount() == 4
+
+
+class TestOrganizePanelDrivenMutations:
+    def test_panel_delete_signal_actually_deletes(self, mutable_view: DocumentView) -> None:
+        # Simulate the panel emitting delete_requested with index 0
+        mutable_view.organize_panel.delete_requested.emit([0])
+        assert mutable_view.adapter.page_count == 2
+        assert mutable_view.is_modified is True
+        # And the panel re-bound to the new state
+        assert mutable_view.organize_panel._grid._model.rowCount() == 2
+
+    def test_panel_rotate_signal_actually_rotates(self, mutable_view: DocumentView) -> None:
+        # Adapter has no public rotation-readback API; verify the
+        # signal wiring by checking is_modified flips True.
+        assert mutable_view.is_modified is False
+        mutable_view.organize_panel.rotate_requested.emit([0], 90)
+        assert mutable_view.is_modified is True
+
+    def test_panel_duplicate_signal_actually_duplicates(self, mutable_view: DocumentView) -> None:
+        mutable_view.organize_panel.duplicate_requested.emit([0, 2])
+        # 3 pages + 2 duplicates = 5
+        assert mutable_view.adapter.page_count == 5
+
+    def test_panel_move_signal_actually_moves(self, mutable_view: DocumentView) -> None:
+        mutable_view.organize_panel.move_requested.emit(0, 2)
+        # Page count unchanged; just reordered
+        assert mutable_view.adapter.page_count == 3
+        assert mutable_view.is_modified is True
