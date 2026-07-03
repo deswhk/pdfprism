@@ -319,6 +319,13 @@ class MainWindow(QMainWindow):
         self.act_crop_page.triggered.connect(self._on_crop_page)
         self.act_crop_page.setEnabled(False)
 
+        self.act_crop_selection = QAction("Crop &Selection...", self)
+        self.act_crop_selection.triggered.connect(self._on_organize_crop_selection)
+        self.act_crop_selection.setEnabled(False)
+        self.act_crop_selection.setToolTip(
+            "Crop selected pages in the Organize panel with the same margins"
+        )
+
         self.act_extract_images = QAction("Extract &Images...", self)
         self.act_extract_images.triggered.connect(self._on_extract_images)
 
@@ -326,6 +333,13 @@ class MainWindow(QMainWindow):
         self.act_extract_pages = QAction("&Extract Pages to File...", self)
         self.act_extract_pages.triggered.connect(self._on_extract_pages)
         self.act_extract_pages.setEnabled(False)
+
+        self.act_extract_selection = QAction("Extract Selectio&n...", self)
+        self.act_extract_selection.triggered.connect(self._on_organize_extract_selection)
+        self.act_extract_selection.setEnabled(False)
+        self.act_extract_selection.setToolTip(
+            "Save selected pages from the Organize panel as a new PDF"
+        )
 
         self.act_insert_pages = QAction("&Insert Pages from File...", self)
         self.act_insert_pages.triggered.connect(self._on_insert_pages)
@@ -443,6 +457,7 @@ class MainWindow(QMainWindow):
         extract_menu.addAction(self.act_extract_images)
         pages_menu = file_menu.addMenu("&Pages")
         pages_menu.addAction(self.act_extract_pages)
+        pages_menu.addAction(self.act_extract_selection)
         pages_menu.addAction(self.act_insert_pages)
         pages_menu.addSeparator()
         pages_menu.addAction(self.act_split)
@@ -464,6 +479,7 @@ class MainWindow(QMainWindow):
         page_menu.addAction(self.act_duplicate_page)
         page_menu.addAction(self.act_move_page)
         page_menu.addAction(self.act_crop_page)
+        page_menu.addAction(self.act_crop_selection)
         page_menu.addSeparator()
         page_menu.addAction(self.act_delete_page)
 
@@ -566,6 +582,14 @@ class MainWindow(QMainWindow):
                 self._active_tab.page_changed.disconnect(self._on_page_changed)
                 self._active_tab.zoom_changed.disconnect(self._on_zoom_changed)
                 self._active_tab.view_mode_changed.disconnect(self._on_view_mode_changed)
+                # PR 9.5: disconnect organize_panel selection
+                # subscription. Use a broad disconnect (no slot arg)
+                # because the connect used a lambda which can't be
+                # referenced by handle.
+                try:
+                    self._active_tab.organize_panel.selection_changed.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
             except (RuntimeError, TypeError):
                 pass
 
@@ -592,6 +616,14 @@ class MainWindow(QMainWindow):
         doc_view.page_changed.connect(self._on_page_changed)
         doc_view.zoom_changed.connect(self._on_zoom_changed)
         doc_view.view_mode_changed.connect(self._on_view_mode_changed)
+        # PR 9.5: refresh selection-based actions when the user
+        # selects/deselects pages in the Organize panel of the
+        # active tab. Uses _refresh_save_actions because that's
+        # where act_crop_selection / act_extract_selection are
+        # toggled. Lambda ignores the emitted indices arg.
+        doc_view.organize_panel.selection_changed.connect(
+            lambda _indices: self._refresh_save_actions()
+        )
 
         mode = doc_view.page_view.view_mode
         if mode == ViewMode.SINGLE_PAGE:
@@ -1219,6 +1251,34 @@ class MainWindow(QMainWindow):
         clear_action.triggered.connect(self._clear_recent_files)
         self._recent_menu.addAction(clear_action)
 
+    def _on_organize_crop_selection(self) -> None:
+        """Edit -> Page -> Crop Selection... slot (Organize panel delegate).
+
+        Delegates to the active tab's OrganizePagesPanel,
+        which handles the dialog + emission. MainWindow's
+        role is discoverability (menu entry) and enable/
+        disable based on selection state; the actual
+        implementation lives on the panel to avoid
+        duplicating dialog + margin-validation logic.
+        """
+        tab = self._active_tab
+        if tab is None:
+            return
+        tab.organize_panel._on_crop_requested()
+
+    def _on_organize_extract_selection(self) -> None:
+        """File -> Pages -> Extract Selection... slot (Organize panel delegate).
+
+        Delegates to the active tab's OrganizePagesPanel,
+        which handles the Save-As dialog + filename
+        suggestion + emission. Same reasoning as
+        _on_crop_selection.
+        """
+        tab = self._active_tab
+        if tab is None:
+            return
+        tab.organize_panel._on_extract_requested()
+
     def _on_about(self) -> None:
         """Help -> About slot: show the modal About dialog."""
         AboutDialog(self).exec()
@@ -1424,6 +1484,15 @@ class MainWindow(QMainWindow):
             self.act_split,
         ):
             act.setEnabled(has_tab)
+
+        # PR 9.5: crop/extract selection actions enable only
+        # when (a) a tab is open AND (b) that tab's Organize
+        # panel has a non-empty selection. Selection state is
+        # tracked via organize_panel.selection_changed
+        # (subscribed in _on_current_tab_changed).
+        has_selection = has_tab and len(self._active_tab.organize_panel.selected_indices) > 0
+        self.act_crop_selection.setEnabled(has_selection)
+        self.act_extract_selection.setEnabled(has_selection)
         # Merge requires at least 2 open tabs.
         self.act_merge.setEnabled(self._tab_widget.count() >= 2)
 
@@ -1581,6 +1650,7 @@ class MainWindow(QMainWindow):
             page_index=idx,
             page_width=info.width_points,
             page_height=info.height_points,
+            page_cache=self._active_tab.organize_panel.cache,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:

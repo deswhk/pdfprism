@@ -891,6 +891,86 @@ anticipates these extensions: the toolbar add pattern is uniform,
 ``selected_indices`` is the universal selection getter, and the
 request-signal contract scales without changes.
 
+### PR 9.5 additions
+
+PR 9.5 extends PR 9 without changing the panel-composition or
+signal-routing story. Three additions land as pure extensions.
+
+**Live crop preview in ``CropDialog``.** A new ``CropPreview``
+sub-widget renders the target page at zoom 0.25 via the shared
+``PageCache`` (no extra rasterisation cost) and overlays the crop
+rectangle: cropped-away regions are dimmed with a semi-transparent
+black band around the retained interior, the interior itself is
+outlined in a calm blue. Spinbox ``valueChanged`` signals push the
+new margins into the preview via ``set_margins``, which triggers a
+repaint but not a re-render. The pixmap is scaled down only when
+it exceeds the preview budget (280 x 360 pixels) -- small thumbnails
+stay pixel-perfect. Over-crop cases (margins that would collapse
+the interior) clamp width/height to non-negative rather than
+raising in the preview; the adapter's ``crop_page`` is the source
+of truth on validity.
+
+``CropDialog``'s constructor gains an optional ``page_cache``
+argument. When absent, the dialog degrades to the PR 8 form-only
+layout -- keeping every existing caller working -- and when
+present, the preview is inserted between the info label and the
+margin form. Both the panel's Crop Selection action and
+MainWindow's ``Edit -> Page -> Crop Page...`` action now pass the
+active tab's ``organize_panel.cache`` so the preview is available
+in every entry point that reaches ``CropDialog``.
+
+**Crop-on-selection.** The panel gains a
+``crop_requested = Signal(list, tuple)`` alongside the PR 9
+operation signals. The composite's ``_on_crop_requested`` slot
+opens ``CropDialog`` sized against the *smallest* selected page so
+the entered margins are safe for every page in the selection (an
+uniform-margins design decision that matches Acrobat's multi-page
+crop). Absolute-points semantics from PR 8 are preserved rather
+than converted to percentages: a percent-of-page mode would be its
+own polish item. ``DocumentView._on_organize_crop`` iterates the
+selection forward (order-independent for crop) and calls
+``adapter.crop_page(idx, margins)`` for each; the standard PR 9
+rebind dance (cache clear, thumbnail rebind, organize rebind, page
+view rebind, refresh_modified) follows. Failure semantics are
+fail-fast: if an adapter call raises mid-loop, earlier iterations'
+state remains applied. This matches PR 9's rotate/delete/duplicate
+behaviour and is pinned by an explicit test so a later refactor to
+atomic rollback would be a conscious change.
+
+**Extract-selection-to-file.** A new
+``PageService.extract_pages_to_file(indices, output_path)`` handles
+the non-contiguous case that PR 8.5's contiguous ``extract_to_file``
+can't. The implementation is a fresh output adapter plus a loop of
+single-page ``insert_pdf`` calls, one per index, appending at
+``out.page_count`` each time. Input order is preserved (not
+sorted), duplicate indices produce duplicate output pages
+(multiplicity kept), and an empty ``indices`` list raises
+``PageOperationError`` rather than saving a zero-page PDF (PyMuPDF
+refuses that anyway; raising early surfaces caller bugs). The
+panel's ``_on_extract_requested`` slot opens ``QFileDialog.getSaveFileName``
+with a suggested name computed by ``_suggest_extract_filename``:
+contiguous selections get ``<stem>_pages_<from>-<to>.pdf`` (1-based
+for human-friendliness), non-contiguous selections get
+``<stem>_pages_selection.pdf``. ``DocumentView._on_organize_extract``
+is read-only against the source document -- no cache clear, no
+panel rebind, no dirty flag change -- symmetric with PR 8.5's
+``extract_to_file``.
+
+**MainWindow integration.** Two menu entries surface the panel-scope
+actions at the MainWindow level: ``Edit -> Page -> Crop Selection...``
+next to the existing ``Crop Page...``, and
+``File -> Pages -> Extract Selection...`` next to the existing
+``Extract Pages to File...``. Both slots delegate to the active
+tab's ``organize_panel._on_crop_requested`` / ``_on_extract_requested``
+rather than duplicating dialog logic -- MainWindow's role here is
+discoverability, not implementation. Enable/disable is gated on
+``(tab open) AND (organize panel selection non-empty)``, tracked
+via a subscription to ``organize_panel.selection_changed`` set up
+in ``_on_current_tab_changed`` (with the symmetric disconnect on
+tab-out). Menu-scope shortcuts are intentionally omitted; the
+panel's own ``Ctrl+E`` for extract with ``WidgetWithChildrenShortcut``
+context stays authoritative.
+
 ## Theme
 
 `pdfprism.ui.theme.DARK_QSS` is a Qt Style Sheet (QSS) string applied

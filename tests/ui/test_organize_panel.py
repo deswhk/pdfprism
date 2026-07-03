@@ -309,3 +309,290 @@ class TestShortcuts:
             wrapper.act_select_all,
         ):
             assert act.shortcutContext() == Qt.ShortcutContext.WidgetWithChildrenShortcut
+
+
+# ---- PR 9.5: Crop wiring tests ------------------------------------------------
+
+
+class TestRequestCropOnGrid:
+    """OrganizePanel.request_crop -> crop_requested signal."""
+
+    def test_no_selection_does_not_emit(self, bound_panel: OrganizePanel) -> None:
+        """Negative: no selection -> no emission (matches other request_* helpers)."""
+        received: list = []
+        bound_panel.crop_requested.connect(
+            lambda indices, margins: received.append((indices, margins))
+        )
+        bound_panel.request_crop((5.0, 5.0, 5.0, 5.0))
+        assert received == []
+
+    def test_with_selection_emits_indices_and_margins(
+        self, bound_panel: OrganizePanel, qtbot
+    ) -> None:
+        """Positive: selection + margins -> exactly one emission."""
+        bound_panel.setCurrentIndex(bound_panel._model.index(1, 0))
+        with qtbot.waitSignal(bound_panel.crop_requested, timeout=500) as blocker:
+            bound_panel.request_crop((10.0, 20.0, 30.0, 40.0))
+        assert blocker.args == [[1], (10.0, 20.0, 30.0, 40.0)]
+
+    def test_multi_selection_passed_through(self, bound_panel: OrganizePanel) -> None:
+        """Positive: multi-select carries every selected index in sorted order."""
+        from PySide6.QtCore import QItemSelectionModel
+
+        sm = bound_panel.selectionModel()
+        sm.select(
+            bound_panel._model.index(0, 0),
+            QItemSelectionModel.SelectionFlag.Select,
+        )
+        sm.select(
+            bound_panel._model.index(2, 0),
+            QItemSelectionModel.SelectionFlag.Select,
+        )
+        received: list = []
+        bound_panel.crop_requested.connect(
+            lambda indices, margins: received.append((indices, margins))
+        )
+        bound_panel.request_crop((5.0, 5.0, 5.0, 5.0))
+        assert received == [([0, 2], (5.0, 5.0, 5.0, 5.0))]
+
+
+class TestSetAdapterStoresReference:
+    """set_adapter must store the adapter for later use by the composite slot."""
+
+    def test_adapter_stored_after_set(
+        self, bound_panel: OrganizePanel, sample_pdf_path: Path
+    ) -> None:
+        """Positive: _adapter attribute holds the bound adapter."""
+        assert bound_panel._adapter is not None
+        # bound_panel was created via a fixture that opened sample_pdf_path.
+        # Confirm the round-trip by reading a page count.
+        assert bound_panel._adapter.page_count == 3
+
+    def test_adapter_reset_to_none(self, bound_panel: OrganizePanel) -> None:
+        """Negative: unbinding sets _adapter back to None."""
+        bound_panel.set_adapter(None)
+        assert bound_panel._adapter is None
+
+
+class TestCropActionOnComposite:
+    """OrganizePagesPanel.act_crop: toolbar/context-menu registration + state."""
+
+    def test_act_crop_exists(self, wrapper: OrganizePagesPanel) -> None:
+        assert wrapper.act_crop is not None
+        assert wrapper.act_crop.text() == "&Crop..."
+
+    def test_act_crop_disabled_when_no_selection(self, wrapper: OrganizePagesPanel) -> None:
+        """Negative: no selection -> action disabled (same rule as rotate/delete)."""
+        assert wrapper.act_crop.isEnabled() is False
+
+    def test_act_crop_enabled_after_selection(self, bound_wrapper: OrganizePagesPanel) -> None:
+        """Positive: selection enables the action."""
+        bound_wrapper._grid.setCurrentIndex(bound_wrapper._grid._model.index(0, 0))
+        assert bound_wrapper.act_crop.isEnabled() is True
+
+    def test_act_crop_in_context_menu_actions(self, wrapper: OrganizePagesPanel) -> None:
+        """Positive: context menu wiring registers the action."""
+        # The context menu is built on demand; verify by inspecting the
+        # slot's handler assembles a menu containing act_crop. Easier:
+        # confirm the action is a child of the wrapper (added via addAction).
+        actions = wrapper.actions()
+        assert wrapper.act_crop in actions
+
+
+class TestCompositeReemitsCropRequested:
+    """Composite re-emits grid.crop_requested unchanged."""
+
+    def test_reemission_carries_indices_and_margins(
+        self, bound_wrapper: OrganizePagesPanel, qtbot
+    ) -> None:
+        """Positive: signal transits the composite without data loss."""
+        bound_wrapper._grid.setCurrentIndex(bound_wrapper._grid._model.index(2, 0))
+        with qtbot.waitSignal(bound_wrapper.crop_requested, timeout=500) as blocker:
+            bound_wrapper._grid.request_crop((1.0, 2.0, 3.0, 4.0))
+        assert blocker.args == [[2], (1.0, 2.0, 3.0, 4.0)]
+
+
+class TestOnCropRequestedSlot:
+    """OrganizePagesPanel._on_crop_requested opens dialog, calls request_crop."""
+
+    def test_no_selection_is_noop(self, wrapper: OrganizePagesPanel, monkeypatch) -> None:
+        """Negative: no selection -> slot returns without opening a dialog."""
+        from pdfprism.ui.dialogs import crop as crop_mod
+
+        opened: list = []
+
+        def spy_init(self, *a, **kw):
+            opened.append((a, kw))
+            raise AssertionError("CropDialog should not be constructed")
+
+        monkeypatch.setattr(crop_mod.CropDialog, "__init__", spy_init)
+        wrapper._on_crop_requested()  # must not raise
+        assert opened == []
+
+    def test_no_adapter_bound_is_noop(self, wrapper: OrganizePagesPanel, monkeypatch) -> None:
+        """Negative: selection but no adapter -> slot returns."""
+        from pdfprism.ui.dialogs import crop as crop_mod
+
+        # Force selection presence via the grid model directly (no real
+        # adapter, but selected_indices only reads the selection model).
+        # The grid's ExtendedSelection with no rows means we can't easily
+        # select anything, so we monkey-patch selected_indices to return
+        # a non-empty list simulating the "selection but no adapter" edge.
+        monkeypatch.setattr(
+            type(wrapper._grid),
+            "selected_indices",
+            property(lambda self: [0]),
+        )
+        opened: list = []
+        monkeypatch.setattr(
+            crop_mod.CropDialog,
+            "__init__",
+            lambda self, *a, **kw: opened.append(True),
+        )
+        wrapper._on_crop_requested()  # must not raise or construct dialog
+        assert opened == []
+
+    def test_accepted_dialog_calls_request_crop(
+        self, bound_wrapper: OrganizePagesPanel, monkeypatch, qtbot
+    ) -> None:
+        """Positive: dialog Accepted -> grid.request_crop called with the margins."""
+        from pdfprism.ui.dialogs import crop as crop_mod
+
+        bound_wrapper._grid.setCurrentIndex(bound_wrapper._grid._model.index(0, 0))
+
+        # Stub CropDialog: don't render a real modal, just claim Accepted
+        # and expose fixed margins.
+        class StubDialog:
+            DialogCode = crop_mod.CropDialog.DialogCode
+
+            def __init__(self, *a, **kw):
+                self.margins = (11.0, 22.0, 33.0, 44.0)
+
+            def exec(self):
+                return self.DialogCode.Accepted
+
+        monkeypatch.setattr(crop_mod, "CropDialog", StubDialog)
+
+        with qtbot.waitSignal(bound_wrapper.crop_requested, timeout=500) as blocker:
+            bound_wrapper._on_crop_requested()
+        assert blocker.args == [[0], (11.0, 22.0, 33.0, 44.0)]
+
+    def test_rejected_dialog_does_not_call_request_crop(
+        self, bound_wrapper: OrganizePagesPanel, monkeypatch
+    ) -> None:
+        """Negative: dialog Rejected -> no crop_requested emission."""
+        from pdfprism.ui.dialogs import crop as crop_mod
+
+        bound_wrapper._grid.setCurrentIndex(bound_wrapper._grid._model.index(0, 0))
+
+        class StubDialog:
+            DialogCode = crop_mod.CropDialog.DialogCode
+
+            def __init__(self, *a, **kw):
+                self.margins = (11.0, 22.0, 33.0, 44.0)
+
+            def exec(self):
+                return self.DialogCode.Rejected
+
+        monkeypatch.setattr(crop_mod, "CropDialog", StubDialog)
+
+        received: list = []
+        bound_wrapper.crop_requested.connect(
+            lambda indices, margins: received.append((indices, margins))
+        )
+        bound_wrapper._on_crop_requested()
+        assert received == []
+
+
+# ---- PR 9.5: Extract wiring tests ------------------------------------------
+
+
+class TestSuggestExtractFilename:
+    """Filename suggestion helper: contiguous vs non-contiguous branches."""
+
+    def test_contiguous_range_gets_range_name(self, wrapper: OrganizePagesPanel) -> None:
+        """Positive: [2,3,4] on 'report' -> 'report_pages_3-5.pdf' (1-based)."""
+        assert wrapper._suggest_extract_filename("report", [2, 3, 4]) == "report_pages_3-5.pdf"
+
+    def test_non_contiguous_gets_selection_name(self, wrapper: OrganizePagesPanel) -> None:
+        """Positive: [0,2,5] on 'report' -> 'report_pages_selection.pdf'."""
+        assert (
+            wrapper._suggest_extract_filename("report", [0, 2, 5]) == "report_pages_selection.pdf"
+        )
+
+    def test_single_page_is_trivially_contiguous(self, wrapper: OrganizePagesPanel) -> None:
+        """Positive: [4] -> '<stem>_pages_5-5.pdf' (single-element ranges are contiguous)."""
+        assert wrapper._suggest_extract_filename("doc", [4]) == "doc_pages_5-5.pdf"
+
+
+class TestOnExtractRequestedSlot:
+    """OrganizePagesPanel._on_extract_requested: opens Save-As, then emits."""
+
+    def test_no_selection_is_noop(self, wrapper: OrganizePagesPanel, monkeypatch) -> None:
+        """Negative: no selection -> no file dialog opens."""
+        from PySide6.QtWidgets import QFileDialog
+
+        opened: list = []
+
+        def spy(*a, **kw):
+            opened.append((a, kw))
+            return ("", "")
+
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", spy)
+        wrapper._on_extract_requested()
+        assert opened == []
+
+    def test_no_adapter_is_noop(self, wrapper: OrganizePagesPanel, monkeypatch) -> None:
+        """Negative: selection but no adapter -> no file dialog."""
+        from PySide6.QtWidgets import QFileDialog
+
+        # Simulate selection via property override (no rows to select on).
+        monkeypatch.setattr(
+            type(wrapper._grid),
+            "selected_indices",
+            property(lambda self: [0]),
+        )
+        opened: list = []
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: opened.append(True) or ("", ""),
+        )
+        wrapper._on_extract_requested()
+        assert opened == []
+
+    def test_dialog_cancelled_does_not_emit(
+        self, bound_wrapper: OrganizePagesPanel, monkeypatch
+    ) -> None:
+        """Negative: user cancels file dialog -> no extract_requested emission."""
+        from PySide6.QtWidgets import QFileDialog
+
+        bound_wrapper._grid.setCurrentIndex(bound_wrapper._grid._model.index(0, 0))
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: ("", ""),  # empty string = cancel
+        )
+        received: list = []
+        bound_wrapper.extract_requested.connect(
+            lambda indices, path: received.append((indices, path))
+        )
+        bound_wrapper._on_extract_requested()
+        assert received == []
+
+    def test_dialog_accepted_emits_with_chosen_path(
+        self, bound_wrapper: OrganizePagesPanel, monkeypatch, qtbot, tmp_path: Path
+    ) -> None:
+        """Positive: user picks a path -> extract_requested fires with it."""
+        from PySide6.QtWidgets import QFileDialog
+
+        bound_wrapper._grid.setCurrentIndex(bound_wrapper._grid._model.index(1, 0))
+        chosen_path = tmp_path / "my_choice.pdf"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: (str(chosen_path), "PDF files (*.pdf)"),
+        )
+        with qtbot.waitSignal(bound_wrapper.extract_requested, timeout=500) as blocker:
+            bound_wrapper._on_extract_requested()
+        assert blocker.args == [[1], chosen_path]

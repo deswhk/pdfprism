@@ -281,3 +281,124 @@ class TestMerge:
     def test_empty_list_raises(self, tmp_path: Path) -> None:
         with pytest.raises(PageOperationError, match="at least two"):
             merge([], tmp_path / "out.pdf")
+
+
+# ---- PR 9.5: extract_pages_to_file (non-contiguous, order-preserving) ------
+
+
+class TestExtractPagesToFile:
+    """PageService.extract_pages_to_file: arbitrary indices, order preserved."""
+
+    # ---- Positive cases -----------------------------------------------------
+
+    def test_contiguous_indices_extracts_range(self, service: PageService, tmp_path: Path) -> None:
+        """Positive: contiguous input works even though the method is
+        intended for arbitrary sets."""
+        out = tmp_path / "extract_contig.pdf"
+        service.extract_pages_to_file([1, 2, 3], out)
+        verifier = PyMuPDFAdapter()
+        verifier.open(out)
+        try:
+            assert verifier.page_count == 3
+            assert "B-1" in verifier.extract_text(0)
+            assert "B-2" in verifier.extract_text(1)
+            assert "B-3" in verifier.extract_text(2)
+        finally:
+            verifier.close()
+
+    def test_non_contiguous_indices_extracts_selected(
+        self, service: PageService, tmp_path: Path
+    ) -> None:
+        """Positive: the headline use case for this method."""
+        out = tmp_path / "extract_noncontig.pdf"
+        service.extract_pages_to_file([0, 2, 5], out)
+        verifier = PyMuPDFAdapter()
+        verifier.open(out)
+        try:
+            assert verifier.page_count == 3
+            assert "B-0" in verifier.extract_text(0)
+            assert "B-2" in verifier.extract_text(1)
+            assert "B-5" in verifier.extract_text(2)
+        finally:
+            verifier.close()
+
+    def test_single_page(self, service: PageService, tmp_path: Path) -> None:
+        """Positive: single-element list produces a 1-page output."""
+        out = tmp_path / "extract_single.pdf"
+        service.extract_pages_to_file([4], out)
+        verifier = PyMuPDFAdapter()
+        verifier.open(out)
+        try:
+            assert verifier.page_count == 1
+            assert "B-4" in verifier.extract_text(0)
+        finally:
+            verifier.close()
+
+    def test_order_preserved_not_sorted(self, service: PageService, tmp_path: Path) -> None:
+        """Positive (design invariant D5): input order is the output order."""
+        out = tmp_path / "extract_reorder.pdf"
+        service.extract_pages_to_file([2, 0, 5], out)
+        verifier = PyMuPDFAdapter()
+        verifier.open(out)
+        try:
+            assert verifier.page_count == 3
+            assert "B-2" in verifier.extract_text(0)
+            assert "B-0" in verifier.extract_text(1)
+            assert "B-5" in verifier.extract_text(2)
+        finally:
+            verifier.close()
+
+    def test_duplicates_preserved(self, service: PageService, tmp_path: Path) -> None:
+        """Positive (design invariant D4): duplicates in input give duplicates in output."""
+        out = tmp_path / "extract_dup.pdf"
+        service.extract_pages_to_file([0, 0, 1], out)
+        verifier = PyMuPDFAdapter()
+        verifier.open(out)
+        try:
+            assert verifier.page_count == 3
+            assert "B-0" in verifier.extract_text(0)
+            assert "B-0" in verifier.extract_text(1)
+            assert "B-1" in verifier.extract_text(2)
+        finally:
+            verifier.close()
+
+    def test_source_untouched(self, service: PageService, tmp_path: Path) -> None:
+        """Positive: source doc unchanged; dirty flag stays False."""
+        before_count = service._adapter.page_count
+        out = tmp_path / "extract_noop_src.pdf"
+        service.extract_pages_to_file([0, 3], out)
+        assert service._adapter.page_count == before_count
+        assert service._adapter.is_dirty is False
+
+    # ---- Negative cases -----------------------------------------------------
+
+    def test_empty_list_raises(self, service: PageService, tmp_path: Path) -> None:
+        """Negative (design D3): empty input is a caller bug -> raise."""
+        from pdfprism.core.exceptions import PageOperationError
+
+        out = tmp_path / "should_not_exist.pdf"
+        with pytest.raises(PageOperationError, match="zero pages"):
+            service.extract_pages_to_file([], out)
+        assert not out.exists()
+
+    def test_out_of_range_index_raises(self, service: PageService, tmp_path: Path) -> None:
+        """Negative: any out-of-range index propagates from the adapter."""
+        from pdfprism.core.exceptions import PageOutOfRangeError
+
+        out = tmp_path / "should_not_exist.pdf"
+        with pytest.raises(PageOutOfRangeError):
+            service.extract_pages_to_file([0, 99], out)
+        # Because save() runs only after the whole loop, the output
+        # file is never created when the loop raises partway.
+        assert not out.exists()
+
+    def test_mid_loop_failure_leaves_source_unchanged(
+        self, service: PageService, tmp_path: Path
+    ) -> None:
+        """Negative: even on failure, source doc's dirty flag stays False."""
+        from pdfprism.core.exceptions import PageOutOfRangeError
+
+        out = tmp_path / "should_not_exist.pdf"
+        with pytest.raises(PageOutOfRangeError):
+            service.extract_pages_to_file([0, 1, 99], out)
+        assert service._adapter.is_dirty is False

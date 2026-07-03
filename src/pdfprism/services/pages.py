@@ -113,6 +113,48 @@ class PageService:
         finally:
             out.close()
 
+    def extract_pages_to_file(
+        self,
+        indices: list[int],
+        output_path: Path,
+    ) -> None:
+        """Save the given pages as a new PDF, preserving list order.
+
+        Unlike ``extract_to_file`` which takes a contiguous
+        range, this method accepts an arbitrary list of
+        0-based page indices. The output PDF contains one
+        page per element in ``indices``, in the same order
+        (duplicates preserved).
+
+        Source document is left untouched (its dirty flag is
+        not affected).
+
+        Raises:
+            PageOperationError: if ``indices`` is empty (empty
+                extraction is almost always a caller bug and
+                PyMuPDF refuses to save a zero-page document).
+            PageOutOfRangeError: if any index is out of range
+                for the source document. Propagated from the
+                adapter mid-loop; earlier iterations' state
+                remains in the output adapter, which is then
+                closed without saving.
+        """
+        from pdfprism.core.exceptions import PageOperationError
+
+        if not indices:
+            raise PageOperationError("Cannot extract zero pages; pass at least one index")
+        out = PyMuPDFAdapter()
+        try:
+            out.new_document()
+            # One insert_pdf per source index: each call inserts
+            # the single page at that index, appended at the end
+            # of the output. Preserves input order + multiplicity.
+            for src_idx in indices:
+                out.insert_pdf(self._adapter, src_idx, src_idx, out.page_count)
+            out.save(output_path)
+        finally:
+            out.close()
+
     def insert_from(
         self,
         source_path: Path,

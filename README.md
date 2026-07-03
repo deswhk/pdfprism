@@ -8,7 +8,7 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 Under active development. Milestones 1–3 are shipped (PR 1 through PR 9); Milestone 4 (security, OCR) is up next. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
 
-**What works today (through PR 9):**
+**What works today (through PR 9.5):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
@@ -27,9 +27,9 @@ Under active development. Milestones 1–3 are shipped (PR 1 through PR 9); Mile
 - Save (Ctrl+S) writes mutations in place; Save As (Ctrl+Shift+S) writes to a new path. Modified tabs show ` *` in the tab title; closing a modified tab prompts Save / Discard / Cancel
 - Edit menu reorganized: Find actions stay at the top; new Edit → Page submenu groups all page operations
 - Cross-document page operations via the new File → Pages submenu: Extract Pages to File (save a page range as a new PDF), Insert Pages from File (insert a range from another PDF at a chosen position), Split Document (every N pages or at specified page boundaries, with zero-padded output names), and Merge Documents (pick from open tabs with reorder, opens the result as a new tab)
-- Organize Pages panel (View → Toggle Organize Pages or F6): dockable grid view of all pages with multi-select (Ctrl/Shift), drag-to-reorder, and selection-aware operations (Rotate Right/Left/180°, Delete, Duplicate) via toolbar, context menu, or keyboard shortcuts (Ctrl+R, Delete, Ctrl+D, Ctrl+A). Hidden by default; persisted across sessions.
+- Organize Pages panel (View → Toggle Organize Pages or F6): dockable grid view of all pages with multi-select (Ctrl/Shift), drag-to-reorder, and selection-aware operations (Rotate Right/Left/180°, Delete, Duplicate, Crop Selection, Extract Selection to File) via toolbar, context menu, or keyboard shortcuts (Ctrl+R, Delete, Ctrl+D, Ctrl+A, Ctrl+E). The Crop dialog now includes a live rendered preview of the page with the crop rectangle drawn over it, updating as you type. Hidden by default; persisted across sessions.
 
-**Coming next:** Milestone 3 is feature-complete. PR 9.5 adds the live crop preview and multi-select crop/extract operations to the Organize panel.
+**Coming next:** Milestone 3 is feature-complete. Milestone 4 (security: passwords, permissions, metadata sanitization, redaction) is up next.
 
 ## Scope
 
