@@ -1106,3 +1106,160 @@ class TestOrganizePanelPerTabSwap:
         main_window._on_tab_close_requested(0)
         # Stack should be back to the placeholder (index 0)
         assert main_window._organize_stack.currentIndex() == 0
+
+
+# ---- PR 9.5: MainWindow selection actions --------------------------------
+
+
+class TestOrganizeSelectionActionsExist:
+    """Both actions and menu entries are wired at MainWindow level."""
+
+    def test_act_crop_selection_defined(self, main_window: MainWindow) -> None:
+        """Positive: action exists and has the expected label."""
+        assert hasattr(main_window, "act_crop_selection")
+        assert main_window.act_crop_selection.text() == "Crop &Selection..."
+
+    def test_act_extract_selection_defined(self, main_window: MainWindow) -> None:
+        """Positive: action exists and has the expected label."""
+        assert hasattr(main_window, "act_extract_selection")
+        assert main_window.act_extract_selection.text() == "Extract Selectio&n..."
+
+
+class TestOrganizeSelectionActionsDisabledInitially:
+    """Negative: no tab open -> actions disabled."""
+
+    def test_crop_selection_disabled_empty_state(self, main_window: MainWindow) -> None:
+        assert main_window.act_crop_selection.isEnabled() is False
+
+    def test_extract_selection_disabled_empty_state(self, main_window: MainWindow) -> None:
+        assert main_window.act_extract_selection.isEnabled() is False
+
+
+class TestOrganizeSelectionEnabledOnSelection:
+    """Positive: actions enable when the active tab has a selection."""
+
+    def test_crop_enabled_after_selection(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        """End-to-end: open, select a page, action becomes enabled."""
+        main_window._open_path(sample_pdf_path)
+        assert main_window.act_crop_selection.isEnabled() is False  # no selection yet
+        # Select page 0 in the active tab's organize panel grid
+        panel = main_window._active_tab.organize_panel
+        panel._grid.setCurrentIndex(panel._grid._model.index(0, 0))
+        assert main_window.act_crop_selection.isEnabled() is True
+
+    def test_extract_enabled_after_selection(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        assert main_window.act_extract_selection.isEnabled() is False
+        panel = main_window._active_tab.organize_panel
+        panel._grid.setCurrentIndex(panel._grid._model.index(1, 0))
+        assert main_window.act_extract_selection.isEnabled() is True
+
+
+class TestOrganizeSelectionActionsDisabledWithoutSelection:
+    """Negative: tab open but no selection -> actions still disabled."""
+
+    def test_crop_stays_disabled_no_selection(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        # Deliberately do not select anything.
+        assert main_window.act_crop_selection.isEnabled() is False
+
+    def test_extract_stays_disabled_no_selection(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        main_window._open_path(sample_pdf_path)
+        assert main_window.act_extract_selection.isEnabled() is False
+
+
+class TestOrganizeSelectionSlots:
+    """Slots delegate to the active tab's OrganizePagesPanel."""
+
+    def test_crop_slot_delegates_to_panel(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: MainWindow's slot calls panel._on_crop_requested."""
+        main_window._open_path(sample_pdf_path)
+        panel = main_window._active_tab.organize_panel
+        # Select something so the panel wouldn't early-return on
+        # selected_indices; but the slot delegation itself is what we
+        # test, so we spy on the panel method.
+        panel._grid.setCurrentIndex(panel._grid._model.index(0, 0))
+        called: list = []
+        monkeypatch.setattr(
+            panel,
+            "_on_crop_requested",
+            lambda: called.append(True),
+        )
+        main_window._on_organize_crop_selection()
+        assert called == [True]
+
+    def test_extract_slot_delegates_to_panel(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: MainWindow's slot calls panel._on_extract_requested."""
+        main_window._open_path(sample_pdf_path)
+        panel = main_window._active_tab.organize_panel
+        panel._grid.setCurrentIndex(panel._grid._model.index(0, 0))
+        called: list = []
+        monkeypatch.setattr(
+            panel,
+            "_on_extract_requested",
+            lambda: called.append(True),
+        )
+        main_window._on_organize_extract_selection()
+        assert called == [True]
+
+    def test_crop_slot_no_active_tab_is_noop(self, main_window: MainWindow) -> None:
+        """Negative: no active tab -> slot returns without raising."""
+        assert main_window._active_tab is None
+        main_window._on_organize_crop_selection()  # must not raise
+
+    def test_extract_slot_no_active_tab_is_noop(self, main_window: MainWindow) -> None:
+        """Negative: no active tab -> slot returns without raising."""
+        assert main_window._active_tab is None
+        main_window._on_organize_extract_selection()  # must not raise
+
+
+class TestOrganizeSelectionMenuEntries:
+    """Menu discoverability: both actions live in the right menus.
+
+    Uses findChildren(QMenu) to enumerate menus by title() rather than
+    iterating menuBar().actions() and calling .text() on each -- the
+    latter is fragile because separator QActions can be reaped by
+    shiboken between the outer-loop and inner-loop, raising
+    ``libshiboken: Internal C++ object already deleted``. Matching by
+    QMenu.title() sidesteps that entirely.
+    """
+
+    @staticmethod
+    def _find_menu_by_title(main_window: MainWindow, title: str):
+        """Return the first QMenu on ``main_window`` whose title matches."""
+        from PySide6.QtWidgets import QMenu
+
+        for menu in main_window.findChildren(QMenu):
+            if menu.title() == title:
+                return menu
+        return None
+
+    def test_crop_selection_in_edit_page_menu(self, main_window: MainWindow) -> None:
+        """Positive: Edit -> Page menu contains act_crop_selection."""
+        page_menu = self._find_menu_by_title(main_window, "&Page")
+        assert page_menu is not None
+        assert main_window.act_crop_selection in page_menu.actions()
+
+    def test_extract_selection_in_file_pages_menu(self, main_window: MainWindow) -> None:
+        """Positive: File -> Pages menu contains act_extract_selection."""
+        pages_menu = self._find_menu_by_title(main_window, "&Pages")
+        assert pages_menu is not None
+        assert main_window.act_extract_selection in pages_menu.actions()

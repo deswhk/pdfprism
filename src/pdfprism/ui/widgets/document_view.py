@@ -84,6 +84,8 @@ class DocumentView(QWidget):
         self._organize_panel.rotate_requested.connect(self._on_organize_rotate)
         self._organize_panel.delete_requested.connect(self._on_organize_delete)
         self._organize_panel.duplicate_requested.connect(self._on_organize_duplicate)
+        self._organize_panel.crop_requested.connect(self._on_organize_crop)
+        self._organize_panel.extract_requested.connect(self._on_organize_extract)
         self._organize_panel.move_requested.connect(self.move_page)
 
         layout = QVBoxLayout(self)
@@ -256,6 +258,55 @@ class DocumentView(QWidget):
         self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
+
+    def _on_organize_crop(
+        self,
+        indices: list[int],
+        margins: tuple[float, float, float, float],
+    ) -> None:
+        """Apply the same crop margins to each selected page.
+
+        Order-independent: each page's cropbox is computed
+        independently, so forward iteration is fine. Empty
+        ``indices`` is a safe no-op (no adapter calls, no
+        rebind, no dirty flag change).
+
+        Margin validation is the dialog's responsibility;
+        adapter-level failures (e.g., zero-area crop) propagate
+        the underlying exception rather than being swallowed.
+        """
+        if not indices:
+            return
+        for i in indices:
+            self._adapter.crop_page(i, margins)
+        self._page_cache.clear()
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def _on_organize_extract(
+        self,
+        indices: list[int],
+        output_path: Path,
+    ) -> None:
+        """Extract the selected pages to a new PDF file.
+
+        Read-only against the source document: no cache
+        clear, no panel rebind, no dirty flag change.
+        Symmetric with PR 8.5's extract_to_file which also
+        leaves the source untouched.
+
+        Empty ``indices`` is defensively silent -- the panel
+        already refuses to emit for empty selections, but
+        being explicit avoids relying on that invariant.
+        """
+        if not indices:
+            return
+        from pdfprism.services.pages import PageService
+
+        service = PageService(self._adapter)
+        service.extract_pages_to_file(indices, output_path)
 
     # ---- Save ------------------------------------------------------------
 

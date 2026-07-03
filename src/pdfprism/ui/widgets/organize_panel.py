@@ -103,6 +103,19 @@ class OrganizePanel(QListView):
     # re-bound; we never touch Qt's model directly.
     move_requested = Signal(int, int)  # from_index, to_index
 
+    # PR 9.5: crop-on-selection. Argument is the list of 0-based
+    # page indices to crop, followed by the (top, right, bottom, left)
+    # margin tuple in PDF points. Emitted by request_crop() after
+    # the CropDialog closes with Accepted.
+    crop_requested = Signal(list, tuple)  # indices, margins
+
+    # PR 9.5: extract-selection-to-file. Argument is the list of
+    # 0-based page indices to extract (order preserved, duplicates
+    # kept), followed by the resolved output ``Path``. Emitted by
+    # request_extract() after the file dialog closes with a chosen
+    # path. ``object`` typing covers pathlib.Path in the Signal.
+    extract_requested = Signal(list, object)  # indices, output_path
+
     def __init__(
         self,
         cache: PageCache,
@@ -110,6 +123,7 @@ class OrganizePanel(QListView):
     ) -> None:
         super().__init__(parent)
         self._cache = cache
+        self._adapter: DocumentAdapter | None = None
         self._model = OrganizeModel(cache, self)
         self.setModel(self._model)
 
@@ -144,6 +158,7 @@ class OrganizePanel(QListView):
 
     def set_adapter(self, adapter: DocumentAdapter | None) -> None:
         """Bind a new document. Resets the cache and the model."""
+        self._adapter = adapter
         self._cache.set_adapter(adapter)
         self._model.set_adapter(adapter)
 
@@ -234,6 +249,23 @@ class OrganizePanel(QListView):
         if sel:
             self.duplicate_requested.emit(sel)
 
+    def request_crop(self, margins: tuple[float, float, float, float]) -> None:
+        """Emit ``crop_requested`` with current selection + margins."""
+        sel = self.selected_indices
+        if sel:
+            self.crop_requested.emit(sel, margins)
+
+    def request_extract(self, output_path: object) -> None:
+        """Emit ``extract_requested`` with current selection + path.
+
+        ``output_path`` is annotated ``object`` because Qt's
+        Signal(list, object) marshalling accepts any Python object;
+        the receiver treats it as ``pathlib.Path``.
+        """
+        sel = self.selected_indices
+        if sel:
+            self.extract_requested.emit(sel, output_path)
+
 
 class OrganizePagesPanel(QWidget):
     """Composite widget: toolbar above an ``OrganizePanel`` grid.
@@ -250,6 +282,8 @@ class OrganizePagesPanel(QWidget):
     delete_requested = Signal(list)
     duplicate_requested = Signal(list)
     move_requested = Signal(int, int)
+    crop_requested = Signal(list, tuple)  # PR 9.5
+    extract_requested = Signal(list, object)  # PR 9.5
 
     def __init__(
         self,
@@ -291,12 +325,26 @@ class OrganizePagesPanel(QWidget):
         self.act_duplicate.setShortcut(QKeySequence("Ctrl+D"))
         self.act_duplicate.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
+        self.act_crop = QAction("&Crop...", self)
+        self.act_crop.setToolTip("Crop selected pages with the same margins")
+        self.act_crop.triggered.connect(self._on_crop_requested)
+        # PR 9.5: no shortcut (Ctrl+K conflicts with common bindings
+        # on some Qt platform themes); menu / toolbar-driven only.
+
+        self.act_extract = QAction("&Extract Selection...", self)
+        self.act_extract.setToolTip("Save selected pages as a new PDF file")
+        self.act_extract.triggered.connect(self._on_extract_requested)
+        self.act_extract.setShortcut(QKeySequence("Ctrl+E"))
+        self.act_extract.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+
         for act in (
             self.act_rotate_right,
             self.act_rotate_left,
             self.act_rotate_180,
             self.act_delete,
             self.act_duplicate,
+            self.act_crop,
+            self.act_extract,
         ):
             act.setEnabled(False)
             toolbar.addAction(act)
@@ -323,6 +371,8 @@ class OrganizePagesPanel(QWidget):
         self._grid.delete_requested.connect(self.delete_requested)
         self._grid.duplicate_requested.connect(self.duplicate_requested)
         self._grid.move_requested.connect(self.move_requested)
+        self._grid.crop_requested.connect(self.crop_requested)
+        self._grid.extract_requested.connect(self.extract_requested)
 
         for act in (
             self.act_rotate_right,
@@ -330,6 +380,8 @@ class OrganizePagesPanel(QWidget):
             self.act_rotate_180,
             self.act_delete,
             self.act_duplicate,
+            self.act_crop,
+            self.act_extract,
             self.act_select_all,
         ):
             self.addAction(act)
@@ -350,6 +402,17 @@ class OrganizePagesPanel(QWidget):
     def selected_indices(self) -> list[int]:
         return self._grid.selected_indices
 
+    @property
+    def cache(self) -> PageCache:
+        """Public accessor for the shared PageCache used by the grid.
+
+        Exposed so dialogs opened by MainWindow-scope actions
+        (e.g., Crop Page) can render previews via the same
+        cache used by the panel thumbnails -- avoids a
+        redundant rasterisation and keeps the LRU warm.
+        """
+        return self._grid._cache
+
     # ---- Selection-driven UI state ------------------------------------------
 
     def _on_selection_changed(self, indices: list[int]) -> None:
@@ -360,6 +423,8 @@ class OrganizePagesPanel(QWidget):
             self.act_rotate_180,
             self.act_delete,
             self.act_duplicate,
+            self.act_crop,
+            self.act_extract,
         ):
             act.setEnabled(has)
         total = self._grid._model.rowCount()
@@ -371,6 +436,92 @@ class OrganizePagesPanel(QWidget):
 
     # ---- Context menu --------------------------------------------------------
 
+    def _on_crop_requested(self) -> None:
+        """Open CropDialog for the current selection; on Accept,
+        emit crop_requested via ``request_crop``.
+
+        For multi-select, the dialog is sized against the
+        smallest selected page so the margins stay safe for
+        every page in the selection.
+        """
+        from pdfprism.ui.dialogs.crop import CropDialog
+
+        indices = self._grid.selected_indices
+        if not indices:
+            return
+        adapter = self._grid._adapter
+        if adapter is None:
+            return
+        # Find the smallest page across the selection to bound
+        # margins conservatively.
+        min_w = float("inf")
+        min_h = float("inf")
+        for i in indices:
+            info = adapter.get_page_info(i)
+            min_w = min(min_w, info.width_points)
+            min_h = min(min_h, info.height_points)
+        dlg = CropDialog(
+            page_index=indices[0],  # title shows the first selected page
+            page_width=min_w,
+            page_height=min_h,
+            page_cache=self._grid._cache,
+            parent=self,
+        )
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            self._grid.request_crop(dlg.margins)
+
+    @staticmethod
+    def _suggest_extract_filename(source_stem: str, indices: list[int]) -> str:
+        """Return a filename suggestion for the extract dialog.
+
+        Contiguous indices produce ``<stem>_pages_<from>-<to>.pdf``
+        (using 1-based page numbers for the human-facing name).
+        Anything else produces ``<stem>_pages_selection.pdf``.
+        A single-index selection is trivially contiguous and
+        produces ``<stem>_pages_<n>-<n>.pdf`` for consistency.
+        """
+        if indices and indices == list(range(indices[0], indices[-1] + 1)):
+            first = indices[0] + 1
+            last = indices[-1] + 1
+            return f"{source_stem}_pages_{first}-{last}.pdf"
+        return f"{source_stem}_pages_selection.pdf"
+
+    def _on_extract_requested(self) -> None:
+        """Open a Save-As dialog for the current selection, then
+        emit extract_requested with (indices, output_path).
+
+        No-op if the selection is empty, the adapter is unbound,
+        or the user cancels the file dialog.
+        """
+        from pathlib import Path as _Path
+
+        from PySide6.QtWidgets import QFileDialog
+
+        indices = self._grid.selected_indices
+        if not indices:
+            return
+        adapter = self._grid._adapter
+        if adapter is None:
+            return
+        # Reach for the adapter's stored path to derive a
+        # sensible filename stem. This is a small leaky
+        # abstraction; a follow-up could lift ``path`` to the
+        # DocumentAdapter Protocol.
+        adapter_path = getattr(adapter, "_path", None)
+        stem = adapter_path.stem if adapter_path is not None else "document"
+        suggested_name = self._suggest_extract_filename(stem, indices)
+        default_dir = str(adapter_path.parent) if adapter_path is not None else ""
+        default_path = f"{default_dir}/{suggested_name}" if default_dir else suggested_name
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Selected Pages As",
+            default_path,
+            "PDF files (*.pdf);;All files (*)",
+        )
+        if not chosen:
+            return
+        self._grid.request_extract(_Path(chosen))
+
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
         menu.addAction(self.act_rotate_right)
@@ -379,6 +530,9 @@ class OrganizePagesPanel(QWidget):
         menu.addSeparator()
         menu.addAction(self.act_duplicate)
         menu.addAction(self.act_delete)
+        menu.addSeparator()
+        menu.addAction(self.act_crop)
+        menu.addAction(self.act_extract)
         menu.addSeparator()
         menu.addAction(self.act_select_all)
         menu.exec(self._grid.viewport().mapToGlobal(pos))
