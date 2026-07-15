@@ -92,9 +92,24 @@ class DocumentView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._page_view)
 
-    def open(self) -> None:
-        """Load the underlying document. Raises PdfPrismError on failure."""
-        self._adapter.open(self._path)
+    def open(self, password: str | None = None) -> None:
+        """Load the underlying document.
+
+        Args:
+            password: If the PDF is encrypted, the password to open
+                it with. ``None`` (the default) opens unencrypted
+                PDFs or raises ``PasswordRequiredError`` on encrypted
+                ones. Passing a non-None password on an unencrypted
+                PDF is silently ignored by the adapter.
+
+        Raises:
+            PdfPrismError: on any open failure (see subclasses).
+            PasswordRequiredError: if the PDF is encrypted and the
+                supplied password is missing or wrong. Callers can
+                retry with a fresh DocumentView + a different
+                password.
+        """
+        self._adapter.open(self._path, password=password)
         self._page_view.set_adapter(self._adapter)
         self._thumbnail_panel.set_adapter(self._adapter)
         self._organize_panel.set_adapter(self._adapter)

@@ -1263,3 +1263,257 @@ class TestOrganizeSelectionMenuEntries:
         pages_menu = self._find_menu_by_title(main_window, "&Pages")
         assert pages_menu is not None
         assert main_window.act_extract_selection in pages_menu.actions()
+
+
+# ---- PR 10: encrypted PDF open flow ---------------------------------
+
+
+class _PasswordDialogStub:
+    """Stub for PasswordDialog that scripts a sequence of user actions.
+
+    Constructed with a list of ``(exec_result, password)`` tuples that
+    are consumed in order. ``exec_result`` is Accepted or Rejected;
+    ``password`` is the string ``self.password`` should return for that
+    attempt.
+    """
+
+    def __init__(self, script: list[tuple[int, str]]):
+        self._script = script
+        self._call_count = 0
+        self.errors_seen: list[str | None] = []
+
+    def make_class(self):
+        """Return a class that mimics PasswordDialog but reads from script."""
+        stub_self = self
+
+        class _StubDialog:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def exec(self):
+                idx = stub_self._call_count
+                stub_self._call_count += 1
+                if idx >= len(stub_self._script):
+                    raise AssertionError(
+                        f"PasswordDialog.exec called {idx + 1} times "
+                        f"but script has only {len(stub_self._script)} entries"
+                    )
+                stub_self._last_exec_idx = idx
+                return stub_self._script[idx][0]
+
+            @property
+            def password(self) -> str:
+                return stub_self._script[stub_self._last_exec_idx][1]
+
+            def set_error_message(self, msg) -> None:
+                stub_self.errors_seen.append(msg)
+
+        return _StubDialog
+
+
+class TestOpenEncryptedPdfHappyPath:
+    """Encrypted PDF flows that end in a successfully opened tab."""
+
+    def test_correct_password_first_try_opens_tab(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: right password on first attempt -> tab opens."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui.dialogs import password as password_mod
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        script = _PasswordDialogStub([(QDialog.DialogCode.Accepted, ENCRYPTED_PDF_PASSWORD)])
+        monkeypatch.setattr(password_mod, "PasswordDialog", script.make_class())
+        # Also patch the import used by main_window.
+        from pdfprism.ui import main_window as mw_mod
+
+        monkeypatch.setattr(mw_mod, "PasswordDialog", script.make_class())
+
+        main_window._open_path(encrypted_pdf_path)
+        assert main_window._tab_widget.count() == 1
+        assert main_window._active_tab is not None
+        assert script.errors_seen == []  # no wrong-password errors shown
+
+    def test_wrong_then_correct_password_opens_tab(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive (retry loop): wrong then right -> tab opens; error banner shown once."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui import main_window as mw_mod
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        script = _PasswordDialogStub(
+            [
+                (QDialog.DialogCode.Accepted, "wrong"),
+                (QDialog.DialogCode.Accepted, ENCRYPTED_PDF_PASSWORD),
+            ]
+        )
+        monkeypatch.setattr(mw_mod, "PasswordDialog", script.make_class())
+
+        main_window._open_path(encrypted_pdf_path)
+        assert main_window._tab_widget.count() == 1
+        assert main_window._active_tab is not None
+        # Exactly one error banner from the wrong-password attempt.
+        assert len(script.errors_seen) == 1
+        assert script.errors_seen[0] and "Incorrect" in script.errors_seen[0]
+
+    def test_multiple_wrong_then_correct_opens_tab(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: 3 wrong then 1 correct -> tab opens (unlimited retries)."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui import main_window as mw_mod
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        script = _PasswordDialogStub(
+            [
+                (QDialog.DialogCode.Accepted, "wrong1"),
+                (QDialog.DialogCode.Accepted, "wrong2"),
+                (QDialog.DialogCode.Accepted, "wrong3"),
+                (QDialog.DialogCode.Accepted, ENCRYPTED_PDF_PASSWORD),
+            ]
+        )
+        monkeypatch.setattr(mw_mod, "PasswordDialog", script.make_class())
+
+        main_window._open_path(encrypted_pdf_path)
+        assert main_window._tab_widget.count() == 1
+        assert len(script.errors_seen) == 3
+
+
+class TestOpenEncryptedPdfCancelPath:
+    """Encrypted PDF flows that end in no tab (user cancelled)."""
+
+    def test_immediate_cancel_produces_empty_state(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative: Cancel on first prompt -> no tab, no active_tab."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui import main_window as mw_mod
+
+        script = _PasswordDialogStub([(QDialog.DialogCode.Rejected, "")])
+        monkeypatch.setattr(mw_mod, "PasswordDialog", script.make_class())
+
+        main_window._open_path(encrypted_pdf_path)
+        assert main_window._tab_widget.count() == 0
+        assert main_window._active_tab is None
+
+    def test_wrong_then_cancel_produces_empty_state(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative: wrong password, then Cancel -> no tab."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui import main_window as mw_mod
+
+        script = _PasswordDialogStub(
+            [
+                (QDialog.DialogCode.Accepted, "wrong"),
+                (QDialog.DialogCode.Rejected, ""),
+            ]
+        )
+        monkeypatch.setattr(mw_mod, "PasswordDialog", script.make_class())
+
+        main_window._open_path(encrypted_pdf_path)
+        assert main_window._tab_widget.count() == 0
+        # But the wrong attempt did trigger an error banner before Cancel.
+        assert len(script.errors_seen) == 1
+
+
+class TestOpenPreservesUnencryptedPath:
+    """Regression: unencrypted PDF path must not touch the prompt code."""
+
+    def test_unencrypted_open_does_not_construct_password_dialog(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative regression: opening an unencrypted PDF must not
+        construct PasswordDialog at all -- would indicate a wiring bug."""
+        from pdfprism.ui import main_window as mw_mod
+
+        constructed: list = []
+
+        class _ExplodeDialog:
+            def __init__(self, *a, **kw) -> None:
+                constructed.append(True)
+                raise AssertionError("PasswordDialog was constructed on an unencrypted PDF open")
+
+        monkeypatch.setattr(mw_mod, "PasswordDialog", _ExplodeDialog)
+
+        main_window._open_path(sample_pdf_path)
+        assert main_window._tab_widget.count() == 1
+        assert constructed == []
+
+
+class TestOpenNonPasswordFailurePath:
+    """Non-password failures still take the flat error dialog path."""
+
+    def test_garbage_file_shows_error_no_password_prompt(
+        self,
+        main_window: MainWindow,
+        garbage_file: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative: not-a-PDF failure surfaces a critical dialog and
+        never constructs PasswordDialog."""
+        from PySide6.QtWidgets import QMessageBox
+
+        from pdfprism.ui import main_window as mw_mod
+
+        constructed: list = []
+
+        class _ExplodeDialog:
+            def __init__(self, *a, **kw) -> None:
+                constructed.append(True)
+                raise AssertionError("PasswordDialog constructed on a non-password failure")
+
+        monkeypatch.setattr(mw_mod, "PasswordDialog", _ExplodeDialog)
+        # Silence the critical dialog so the test doesn't block.
+        monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: 0)
+
+        main_window._open_path(garbage_file)
+        assert main_window._tab_widget.count() == 0
+        assert constructed == []
+
+    def test_missing_file_shows_error_no_password_prompt(
+        self,
+        main_window: MainWindow,
+        missing_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative: missing file surfaces critical dialog, no password prompt."""
+        from PySide6.QtWidgets import QMessageBox
+
+        from pdfprism.ui import main_window as mw_mod
+
+        constructed: list = []
+        monkeypatch.setattr(
+            mw_mod,
+            "PasswordDialog",
+            lambda *a, **k: constructed.append(True) or (_ for _ in ()).throw(AssertionError()),
+        )
+        monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: 0)
+
+        main_window._open_path(missing_pdf_path)
+        assert main_window._tab_widget.count() == 0
+        assert constructed == []

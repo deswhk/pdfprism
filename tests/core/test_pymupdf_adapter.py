@@ -12,6 +12,7 @@ from pdfprism.core.exceptions import (
     DocumentSaveError,
     PageOperationError,
     PageOutOfRangeError,
+    PasswordRequiredError,
 )
 from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo, SearchHit
 
@@ -698,3 +699,116 @@ class TestInsertPdf:
         finally:
             target.close()
             source.close()
+
+
+# ---- PR 10: password path ---------------------------------------------
+
+
+class TestEncryptedOpen:
+    """PyMuPDFAdapter.open with the password parameter."""
+
+    # ---- Positive cases ------------------------------------------------
+
+    def test_correct_password_opens(self, encrypted_pdf_path: Path) -> None:
+        """Positive: right password -> opens normally."""
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            assert adapter.page_count == 1
+        finally:
+            adapter.close()
+
+    def test_needs_password_true_before_open_flag(self, encrypted_pdf_path: Path) -> None:
+        """Positive: the DocumentInfo carries needs_password=True.
+
+        After a successful authenticated open, ``needs_password`` still
+        reports the *original* state of the document, not the currently-
+        authenticated state. This is intentional -- ``needs_password``
+        answers 'was this encrypted?' not 'am I authenticated now?'.
+        """
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            info = adapter.get_document_info()
+            assert info.needs_password is True
+        finally:
+            adapter.close()
+
+    def test_password_ignored_on_unencrypted_pdf(self, sample_pdf_path: Path) -> None:
+        """Positive (design invariant Q4): passing a password on an
+        unencrypted PDF is silently accepted -- PyMuPDF's authenticate()
+        no-ops for unencrypted docs. This lets callers pass a password
+        without first probing needs_password."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(sample_pdf_path, password="hunter2")
+        try:
+            assert adapter.page_count == 3
+            assert adapter.get_document_info().needs_password is False
+        finally:
+            adapter.close()
+
+    # ---- Negative cases ------------------------------------------------
+
+    def test_missing_password_raises(self, encrypted_pdf_path: Path) -> None:
+        """Negative: no password on encrypted PDF -> PasswordRequiredError."""
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(PasswordRequiredError):
+            adapter.open(encrypted_pdf_path)
+
+    def test_empty_string_password_raises(self, encrypted_pdf_path: Path) -> None:
+        """Negative: empty string treated as wrong password."""
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(PasswordRequiredError):
+            adapter.open(encrypted_pdf_path, password="")
+
+    def test_wrong_password_raises(self, encrypted_pdf_path: Path) -> None:
+        """Negative: wrong password -> PasswordRequiredError."""
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(PasswordRequiredError):
+            adapter.open(encrypted_pdf_path, password="wrong")
+
+    def test_none_password_raises(self, encrypted_pdf_path: Path) -> None:
+        """Negative: explicit None -> same behavior as missing arg."""
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(PasswordRequiredError):
+            adapter.open(encrypted_pdf_path, password=None)
+
+    def test_failed_auth_leaves_adapter_closed(self, encrypted_pdf_path: Path) -> None:
+        """Negative: on auth failure the adapter must not hold a doc.
+
+        Otherwise a naive caller could re-attempt operations on an
+        adapter that thinks it has a document, and get confusing errors.
+        Verified by trying to use the adapter after failed open --
+        should raise (because _require_open catches it).
+        """
+        from pdfprism.core.exceptions import DocumentOpenError
+
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(PasswordRequiredError):
+            adapter.open(encrypted_pdf_path, password="wrong")
+        # Adapter should not hold an authenticated doc.
+        with pytest.raises((DocumentOpenError, AssertionError, AttributeError)):
+            _ = adapter.page_count
+
+    def test_retry_after_failed_auth_works(self, encrypted_pdf_path: Path) -> None:
+        """Positive: same adapter can retry after a failed attempt.
+
+        Real UX flow: user types wrong password, then correct one on
+        the same adapter instance. Must not require constructing a fresh
+        adapter each attempt.
+        """
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(PasswordRequiredError):
+            adapter.open(encrypted_pdf_path, password="wrong")
+        # Now retry with the correct password on the SAME adapter.
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            assert adapter.page_count == 1
+        finally:
+            adapter.close()
