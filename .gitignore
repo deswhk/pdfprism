@@ -41,3 +41,11 @@ logs/
 
 # Build/release artifacts
 *.spec
+
+# Smoke test artifacts (top-level PDFs / images used by manual testing).
+# Only tests/fixtures/*.pdf is committed; any *.pdf at the repo root or in
+# a smoke_/probe_ prefix is transient scratch.
+/*.pdf
+/*.png
+smoke_*
+probe_*
