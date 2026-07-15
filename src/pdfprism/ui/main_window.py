@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from pdfprism.config import MAX_RECENT_FILES
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.exceptions import (
+    EncryptionOperationError,
     PasswordRequiredError,
     PdfPrismError,
 )
@@ -34,6 +35,7 @@ from pdfprism.services.pages import merge as merge_documents
 from pdfprism.services.search import SearchScope, SearchService
 from pdfprism.ui.dialogs.about import AboutDialog
 from pdfprism.ui.dialogs.crop import CropDialog
+from pdfprism.ui.dialogs.crypt import CryptDialog
 from pdfprism.ui.dialogs.extract import ExtractDialog, ExtractKind
 from pdfprism.ui.dialogs.extract_pages import ExtractPagesDialog
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
@@ -345,6 +347,13 @@ class MainWindow(QMainWindow):
             "Save selected pages from the Organize panel as a new PDF"
         )
 
+        self.act_security_password = QAction("&Password...", self)
+        self.act_security_password.triggered.connect(self._on_security_password)
+        self.act_security_password.setEnabled(False)
+        self.act_security_password.setToolTip(
+            "Set, change, or remove the password on this document"
+        )
+
         self.act_insert_pages = QAction("&Insert Pages from File...", self)
         self.act_insert_pages.triggered.connect(self._on_insert_pages)
         self.act_insert_pages.setEnabled(False)
@@ -466,6 +475,8 @@ class MainWindow(QMainWindow):
         pages_menu.addSeparator()
         pages_menu.addAction(self.act_split)
         pages_menu.addAction(self.act_merge)
+        security_menu = file_menu.addMenu("Se&curity")
+        security_menu.addAction(self.act_security_password)
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
 
@@ -1283,6 +1294,56 @@ class MainWindow(QMainWindow):
             return
         tab.organize_panel._on_extract_requested()
 
+    def _on_security_password(self) -> None:
+        """File -> Security -> Password... slot.
+
+        Opens CryptDialog in the appropriate mode based on the
+        active tab's encryption state, then delegates to the
+        SecurityService method matching the user's intent.
+
+        For the destructive Remove branch, a confirmation
+        prompt gates the actual removal -- accidentally
+        producing an unpassword-protected copy of a
+        sensitive document would be a serious data-security
+        regression.
+        """
+        tab = self._active_tab
+        if tab is None:
+            return
+        is_encrypted = tab.adapter.get_document_info().needs_password
+        dlg = CryptDialog(is_encrypted, tab.path.name, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        try:
+            if dlg.remove_requested:
+                confirm = QMessageBox.question(
+                    self,
+                    "Remove Password?",
+                    (
+                        f'This will save "{tab.path.name}" without a '
+                        "password. Anyone with access to the file will be "
+                        "able to open it. Continue?"
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if confirm != QMessageBox.StandardButton.Yes:
+                    return
+                tab.remove_password()
+            elif is_encrypted:
+                tab.change_password(dlg.new_password)
+            else:
+                tab.set_password(dlg.new_password)
+        except EncryptionOperationError as exc:
+            QMessageBox.critical(self, "Password Operation Failed", str(exc))
+            return
+        except PdfPrismError as exc:
+            QMessageBox.critical(self, "Save Failed", str(exc))
+            return
+
+        self._refresh_save_actions()
+
     def _on_about(self) -> None:
         """Help -> About slot: show the modal About dialog."""
         AboutDialog(self).exec()
@@ -1497,6 +1558,8 @@ class MainWindow(QMainWindow):
         has_selection = has_tab and len(self._active_tab.organize_panel.selected_indices) > 0
         self.act_crop_selection.setEnabled(has_selection)
         self.act_extract_selection.setEnabled(has_selection)
+        # PR 10.5: security action -- enables with any open tab.
+        self.act_security_password.setEnabled(has_tab)
         # Merge requires at least 2 open tabs.
         self.act_merge.setEnabled(self._tab_widget.count() >= 2)
 

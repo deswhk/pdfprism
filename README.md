@@ -6,9 +6,9 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 ## Status
 
-Under active development. Milestones 1–3 and PR 10 shipped; the rest of Milestone 4 (write-side encryption, permissions, metadata sanitization, redaction, OCR) is up next. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
+Under active development. Milestones 1–3 and PR 10, PR 10.5 shipped; the rest of Milestone 4 (permissions, metadata sanitization, redaction, OCR) is up next. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
 
-**What works today (through PR 10):**
+**What works today (through PR 10.5):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
@@ -24,13 +24,13 @@ Under active development. Milestones 1–3 and PR 10 shipped; the rest of Milest
 - Text selection with a Hand/Select tool toggle (H / V), drag-rect word selection with blue translucent highlight, Ctrl+C copy, and a right-click context menu for Copy or Extract Selection to File
 - File → Extract menu for whole-document Text and Images extraction, with a page-range dialog; per-hit context snippets now show beside each result in the cross-document search panel
 - Page operations on the current page: rotate (Ctrl+R / Ctrl+Shift+R / 180°), delete (with confirmation), insert blank page after, duplicate, move (Ctrl+Shift+M), and crop (margin dialog in PDF points)
-- Encrypted PDFs: opening password-protected files prompts for the password with an inline retry loop (wrong password shows an error banner, unlimited retries, Cancel gives up cleanly). No password caching; re-opens from Recent Files prompt again. Setting, changing, or removing passwords on save is coming in a follow-up PR.
+- Encrypted PDFs: opening password-protected files prompts for the password with an inline retry loop (wrong password shows an error banner, unlimited retries, Cancel gives up cleanly). No password caching; re-opens from Recent Files prompt again. Set, change, or remove the password on any open document via File → Security → Password... -- destructive Remove branch is guarded by a confirmation prompt.
 - Save (Ctrl+S) writes mutations in place; Save As (Ctrl+Shift+S) writes to a new path. Modified tabs show ` *` in the tab title; closing a modified tab prompts Save / Discard / Cancel
 - Edit menu reorganized: Find actions stay at the top; new Edit → Page submenu groups all page operations
 - Cross-document page operations via the new File → Pages submenu: Extract Pages to File (save a page range as a new PDF), Insert Pages from File (insert a range from another PDF at a chosen position), Split Document (every N pages or at specified page boundaries, with zero-padded output names), and Merge Documents (pick from open tabs with reorder, opens the result as a new tab)
 - Organize Pages panel (View → Toggle Organize Pages or F6): dockable grid view of all pages with multi-select (Ctrl/Shift), drag-to-reorder, and selection-aware operations (Rotate Right/Left/180°, Delete, Duplicate, Crop Selection, Extract Selection to File) via toolbar, context menu, or keyboard shortcuts (Ctrl+R, Delete, Ctrl+D, Ctrl+A, Ctrl+E). The Crop dialog now includes a live rendered preview of the page with the crop rectangle drawn over it, updating as you type. Hidden by default; persisted across sessions.
 
-**Coming next:** Milestone 4 is underway. PR 10.5 adds setting / changing / removing passwords on save; PR 11 is permissions and metadata sanitization; PR 12 is redaction; PR 13 is OCR.
+**Coming next:** Milestone 4 continues. PR 11 adds permissions (owner-password territory) and metadata sanitization; PR 12 is redaction (own PR because correctness is critical); PR 13 is OCR via Tesseract.
 
 ## Scope
 

@@ -14,7 +14,7 @@ from pdfprism.core.exceptions import (
     PageOutOfRangeError,
     PasswordRequiredError,
 )
-from pdfprism.core.types import DocumentInfo, OutlineItem, PageInfo, SearchHit
+from pdfprism.core.types import DocumentInfo, EncryptionSpec, OutlineItem, PageInfo, SearchHit
 
 # PNG file signature
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -812,3 +812,366 @@ class TestEncryptedOpen:
             assert adapter.page_count == 1
         finally:
             adapter.close()
+
+
+# ---- PR 10.5: encryption round-trips on save --------------------------
+
+
+class TestEncryptionSaveRoundTrip:
+    """PyMuPDFAdapter.save(encryption=EncryptionSpec(...)) round-trips."""
+
+    # ---- Positive cases -------------------------------------------------
+
+    def test_add_password_to_unencrypted_pdf(self, mutable_pdf_path: Path, tmp_path: Path) -> None:
+        """Positive: unencrypted -> encrypted, correct password authenticates."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            out = tmp_path / "add_password.pdf"
+            adapter.save(
+                out,
+                encryption=EncryptionSpec(user_password="hunter2"),
+            )
+        finally:
+            adapter.close()
+
+        # Reopen: should now require password
+        verifier = PyMuPDFAdapter()
+        with pytest.raises(PasswordRequiredError):
+            verifier.open(out)
+        # Correct password opens
+        verifier.open(out, password="hunter2")
+        try:
+            assert verifier.get_document_info().needs_password is True
+        finally:
+            verifier.close()
+
+    def test_change_password_on_encrypted_pdf(
+        self, encrypted_pdf_path: Path, tmp_path: Path
+    ) -> None:
+        """Positive: encrypted with pw A -> save with pw B; A fails, B works."""
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            out = tmp_path / "changed_password.pdf"
+            adapter.save(
+                out,
+                encryption=EncryptionSpec(user_password="new_password"),
+            )
+        finally:
+            adapter.close()
+
+        verifier = PyMuPDFAdapter()
+        # Old password should NOT open the new file
+        with pytest.raises(PasswordRequiredError):
+            verifier.open(out, password=ENCRYPTED_PDF_PASSWORD)
+        # New password does
+        verifier.open(out, password="new_password")
+        try:
+            assert verifier.page_count == 1  # from encrypted fixture
+        finally:
+            verifier.close()
+
+    def test_remove_password_from_encrypted_pdf(
+        self, encrypted_pdf_path: Path, tmp_path: Path
+    ) -> None:
+        """Positive: encrypted -> save with EncryptionSpec(None) -> unencrypted."""
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            out = tmp_path / "removed_password.pdf"
+            adapter.save(
+                out,
+                encryption=EncryptionSpec(user_password=None),
+            )
+        finally:
+            adapter.close()
+
+        # Reopen with NO password should succeed
+        verifier = PyMuPDFAdapter()
+        verifier.open(out)  # no password kwarg
+        try:
+            assert verifier.get_document_info().needs_password is False
+        finally:
+            verifier.close()
+
+    def test_explicit_owner_password_different_from_user(
+        self, mutable_pdf_path: Path, tmp_path: Path
+    ) -> None:
+        """Positive: explicit owner_pw different from user_pw round-trips.
+
+        PyMuPDF's authenticate() accepts either; we test that the user
+        password opens the file (owner-password permission semantics
+        arrive with PR 11).
+        """
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            out = tmp_path / "explicit_owner.pdf"
+            adapter.save(
+                out,
+                encryption=EncryptionSpec(
+                    user_password="userpw",
+                    owner_password="ownerpw",
+                ),
+            )
+        finally:
+            adapter.close()
+
+        verifier = PyMuPDFAdapter()
+        verifier.open(out, password="userpw")
+        try:
+            assert verifier.page_count == 3  # sample.pdf pages
+        finally:
+            verifier.close()
+
+    def test_in_place_save_with_new_password(self, mutable_pdf_path: Path) -> None:
+        """Positive: default-path save with encryption change round-trips.
+
+        Uses the existing in-place temp-file dance; adapter stays
+        usable afterward because save() re-opens + authenticates.
+        """
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.save(encryption=EncryptionSpec(user_password="hunter2"))
+            # Adapter should still be usable post-save (re-opened +
+            # authenticated internally)
+            assert adapter.page_count == 3
+            info = adapter.get_document_info()
+            assert info.needs_password is True
+        finally:
+            adapter.close()
+
+    def test_save_as_with_encryption_leaves_source_untouched(
+        self, sample_pdf_path: Path, tmp_path: Path
+    ) -> None:
+        """Positive: save-as with encryption -> source stays unencrypted."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(sample_pdf_path)
+        try:
+            out = tmp_path / "encrypted_copy.pdf"
+            adapter.save(
+                out,
+                encryption=EncryptionSpec(user_password="secret"),
+            )
+        finally:
+            adapter.close()
+
+        # Source unchanged: still opens without password
+        src_verifier = PyMuPDFAdapter()
+        src_verifier.open(sample_pdf_path)  # no password
+        try:
+            assert src_verifier.get_document_info().needs_password is False
+        finally:
+            src_verifier.close()
+
+    def test_none_encryption_preserves_unencrypted_state(
+        self, mutable_pdf_path: Path, tmp_path: Path
+    ) -> None:
+        """Positive (preserve invariant): save(encryption=None) on
+        unencrypted PDF leaves output unencrypted."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            out = tmp_path / "still_unencrypted.pdf"
+            adapter.save(out)  # encryption defaults to None
+        finally:
+            adapter.close()
+
+        verifier = PyMuPDFAdapter()
+        verifier.open(out)
+        try:
+            assert verifier.get_document_info().needs_password is False
+        finally:
+            verifier.close()
+
+    def test_none_encryption_preserves_encrypted_state(
+        self, encrypted_pdf_path: Path, tmp_path: Path
+    ) -> None:
+        """Positive (preserve invariant): save(encryption=None) on
+        encrypted PDF leaves output encrypted with the same password."""
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            out = tmp_path / "still_encrypted.pdf"
+            adapter.save(out)  # encryption=None
+        finally:
+            adapter.close()
+
+        verifier = PyMuPDFAdapter()
+        with pytest.raises(PasswordRequiredError):
+            verifier.open(out)
+        # Same password still works
+        verifier.open(out, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            assert verifier.get_document_info().needs_password is True
+        finally:
+            verifier.close()
+
+    # ---- Negative cases -------------------------------------------------
+
+    def test_owner_only_encryption_rejected(self, mutable_pdf_path: Path, tmp_path: Path) -> None:
+        """Negative: EncryptionSpec(user_password=None, owner_password='x')
+        raises DocumentSaveError before any I/O."""
+        from pdfprism.core.exceptions import DocumentSaveError
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            out = tmp_path / "should_not_be_written.pdf"
+            with pytest.raises(DocumentSaveError, match="owner-only"):
+                adapter.save(
+                    out,
+                    encryption=EncryptionSpec(
+                        user_password=None,
+                        owner_password="ownerpw",
+                    ),
+                )
+            # Fast-fail: no temp file or output file left behind.
+            assert not out.exists()
+        finally:
+            adapter.close()
+
+    def test_save_without_open_raises(self, tmp_path: Path) -> None:
+        """Negative regression: save on unopened adapter still raises."""
+        from pdfprism.core.exceptions import DocumentOpenError
+
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(DocumentOpenError):
+            adapter.save(
+                tmp_path / "never.pdf",
+                encryption=EncryptionSpec(user_password="x"),
+            )
+
+
+# ---- PR 10.5 regression: PyMuPDF 1.27.x needs_pass-de-auth bug -----------
+
+
+class TestNeedsPassDoesNotDeAuthenticate:
+    """Guard against a PyMuPDF 1.27.x quirk that PR 10.5 originally tripped.
+
+    Reading ``doc.needs_pass`` on an authenticated encrypted document
+    silently de-authenticates it -- subsequent text extraction and page
+    rendering return empty. The adapter must therefore *never* read
+    ``self._doc.needs_pass`` after ``open()`` completes; it should use
+    ``self._is_encrypted_at_open`` (a snapshot captured before auth) for
+    any subsequent state check.
+
+    These tests exercise the code paths that would previously have
+    de-authenticated the doc: ``get_document_info()``, and any operation
+    that touches the encryption state after open.
+    """
+
+    def test_get_document_info_does_not_de_auth(self, encrypted_pdf_path: Path) -> None:
+        """Positive: calling get_document_info() on an authenticated
+        encrypted doc must not break subsequent text extraction."""
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            # Pre-check: text works right after open
+            page_before = adapter._doc.load_page(0)
+            # Encrypted fixture has minimal text but page loads should work
+            _ = page_before.get_text()
+
+            # Call the operation that previously de-authenticated the doc
+            info = adapter.get_document_info()
+            assert info.needs_password is True
+
+            # Text extraction must still work after get_document_info
+            # (this would return empty pre-fix)
+            page_after = adapter._doc.load_page(0)
+            # If de-auth happened, load_page or get_text would fail/return empty
+            _ = page_after.get_text()
+
+            # Render must also still work
+            pix = adapter._doc.load_page(0).get_pixmap()
+            assert pix.width > 0 and pix.height > 0
+        finally:
+            adapter.close()
+
+    def test_repeated_get_document_info_does_not_de_auth(self, encrypted_pdf_path: Path) -> None:
+        """Positive: multiple info calls in a row still leave the doc usable."""
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            for _ in range(5):
+                info = adapter.get_document_info()
+                assert info.needs_password is True
+            # After 5 info calls, the doc must still be authenticated:
+            # load_page + render still work.
+            pix = adapter._doc.load_page(0).get_pixmap()
+            assert pix.width > 0
+        finally:
+            adapter.close()
+
+    def test_render_page_after_get_document_info_works(self, encrypted_pdf_path: Path) -> None:
+        """Positive: the exact sequence the app uses -- info followed by
+        render_page -- must produce a real (non-blank) pixmap."""
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            _ = adapter.get_document_info()  # the trigger, previously
+            # Render via the adapter's public method
+            png_bytes = adapter.render_page(0, zoom=1.0)
+            # Non-empty PNG. Pre-fix this would produce a blank output.
+            assert len(png_bytes) > 100
+
+            # Also confirm the doc's page still has text (fixture is
+            # minimal but present -- verify by comparing to a fresh
+            # authenticated pymupdf open).
+            import pymupdf
+
+            probe = pymupdf.open(str(encrypted_pdf_path))
+            probe.authenticate(ENCRYPTED_PDF_PASSWORD)
+            expected_text_len = len(probe.load_page(0).get_text())
+            probe.close()
+
+            adapter_text_len = len(adapter._doc.load_page(0).get_text())
+            assert adapter_text_len == expected_text_len, (
+                f"Adapter text extraction returned {adapter_text_len} chars "
+                f"but fresh authenticated PyMuPDF returned {expected_text_len}. "
+                "This indicates the adapter's _doc has been de-authenticated."
+            )
+        finally:
+            adapter.close()
+
+    def test_snapshot_flag_matches_open_time_state(
+        self, encrypted_pdf_path: Path, mutable_pdf_path: Path
+    ) -> None:
+        """Positive: _is_encrypted_at_open reflects the encryption state
+        at open() time, and stays stable across operations."""
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        # Encrypted case
+        adapter1 = PyMuPDFAdapter()
+        adapter1.open(encrypted_pdf_path, password=ENCRYPTED_PDF_PASSWORD)
+        try:
+            assert adapter1._is_encrypted_at_open is True
+            # Stays true after other operations
+            _ = adapter1.get_document_info()
+            assert adapter1._is_encrypted_at_open is True
+        finally:
+            adapter1.close()
+        # After close, flag resets
+        assert adapter1._is_encrypted_at_open is False
+
+        # Unencrypted case
+        adapter2 = PyMuPDFAdapter()
+        adapter2.open(mutable_pdf_path)
+        try:
+            assert adapter2._is_encrypted_at_open is False
+        finally:
+            adapter2.close()

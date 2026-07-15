@@ -12,7 +12,7 @@ tab change.
 from pathlib import Path
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.types import SearchHit
@@ -334,4 +334,108 @@ class DocumentView(QWidget):
         """Save to a new path; subsequent in-place saves go to this path."""
         self._adapter.save(path)
         self._path = path
+        self._refresh_modified()
+
+    # PR 10.5: encryption operations (delegate to SecurityService)
+
+    def set_password(self, password: str) -> None:
+        """Add a password to an unencrypted document (in-place save)."""
+        from pdfprism.services.security import SecurityService
+
+        # PR 10.5: encryption changes trigger an in-place adapter
+        # save that closes and reopens the underlying pymupdf.Document.
+        # Any pymupdf.Page handles held by the panels become stale --
+        # a Qt paint event landing between close and reopen produces
+        # 'aes padding out of range' / 'syntax error in content stream'
+        # errors as MuPDF decrypts with the old crypt keys. Fix: detach
+        # + clear cache BEFORE the save so no widget holds a live page
+        # handle during the swap; rebind afterwards.
+        self._thumbnail_panel.set_adapter(None)
+        self._organize_panel.set_adapter(None)
+        self._page_view.set_adapter(None)
+        self._page_cache.clear()
+        # PR 10.5: flush pending Qt paint events against the just-
+        # detached (empty) panels. Any repaints queued before the
+        # detach otherwise fire DURING the adapter's in-place save,
+        # touching pymupdf.Page handles captured before the detach
+        # (they leak past the None-binding via already-queued paints
+        # in Qt's event queue). Draining them here means any late
+        # repaint sees the panels in their empty state.
+        QApplication.processEvents()
+
+        SecurityService(self._adapter).set_password(password)
+
+        # Rebind panels to the fresh adapter (its _doc is the
+        # newly-opened post-save Document).
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def change_password(self, password: str) -> None:
+        """Change the password on an already-encrypted document (in-place)."""
+        from pdfprism.services.security import SecurityService
+
+        # PR 10.5: encryption changes trigger an in-place adapter
+        # save that closes and reopens the underlying pymupdf.Document.
+        # Any pymupdf.Page handles held by the panels become stale --
+        # a Qt paint event landing between close and reopen produces
+        # 'aes padding out of range' / 'syntax error in content stream'
+        # errors as MuPDF decrypts with the old crypt keys. Fix: detach
+        # + clear cache BEFORE the save so no widget holds a live page
+        # handle during the swap; rebind afterwards.
+        self._thumbnail_panel.set_adapter(None)
+        self._organize_panel.set_adapter(None)
+        self._page_view.set_adapter(None)
+        self._page_cache.clear()
+        # PR 10.5: flush pending Qt paint events against the just-
+        # detached (empty) panels. Any repaints queued before the
+        # detach otherwise fire DURING the adapter's in-place save,
+        # touching pymupdf.Page handles captured before the detach
+        # (they leak past the None-binding via already-queued paints
+        # in Qt's event queue). Draining them here means any late
+        # repaint sees the panels in their empty state.
+        QApplication.processEvents()
+
+        SecurityService(self._adapter).change_password(password)
+
+        # Rebind panels to the fresh adapter (its _doc is the
+        # newly-opened post-save Document).
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
+        self._refresh_modified()
+
+    def remove_password(self) -> None:
+        """Remove the password from an encrypted document (in-place)."""
+        from pdfprism.services.security import SecurityService
+
+        # PR 10.5: encryption changes trigger an in-place adapter
+        # save that closes and reopens the underlying pymupdf.Document.
+        # Any pymupdf.Page handles held by the panels become stale --
+        # a Qt paint event landing between close and reopen produces
+        # 'aes padding out of range' / 'syntax error in content stream'
+        # errors as MuPDF decrypts with the old crypt keys. Fix: detach
+        # + clear cache BEFORE the save so no widget holds a live page
+        # handle during the swap; rebind afterwards.
+        self._thumbnail_panel.set_adapter(None)
+        self._organize_panel.set_adapter(None)
+        self._page_view.set_adapter(None)
+        self._page_cache.clear()
+        # PR 10.5: flush pending Qt paint events against the just-
+        # detached (empty) panels. Any repaints queued before the
+        # detach otherwise fire DURING the adapter's in-place save,
+        # touching pymupdf.Page handles captured before the detach
+        # (they leak past the None-binding via already-queued paints
+        # in Qt's event queue). Draining them here means any late
+        # repaint sees the panels in their empty state.
+        QApplication.processEvents()
+
+        SecurityService(self._adapter).remove_password()
+
+        # Rebind panels to the fresh adapter (its _doc is the
+        # newly-opened post-save Document).
+        self._thumbnail_panel.set_adapter(self._adapter)
+        self._organize_panel.set_adapter(self._adapter)
+        self._page_view.set_adapter(self._adapter)
         self._refresh_modified()

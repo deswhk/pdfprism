@@ -113,3 +113,40 @@ class ExtractedImage:
     height: int
     ext: str
     data: bytes
+
+
+@dataclass(frozen=True)
+class EncryptionSpec:
+    """Save-time encryption spec for PDF documents (PR 10.5).
+
+    Passed to ``DocumentAdapter.save(encryption=...)`` to change the
+    encryption state of the output file. ``None`` on the ``encryption``
+    argument means "preserve current state" (the pre-PR-10.5 default);
+    passing an explicit spec is how a caller opts into a change.
+
+    Value semantics:
+        - ``user_password=None`` and ``owner_password=None`` -> output
+          has no encryption at all. This is the "remove password" case.
+        - ``user_password="foo"`` and ``owner_password=None`` ->
+          owner_password defaults to the user_password. PyMuPDF requires
+          *some* owner password when a user password is set; using the
+          same string is the standard convention when the caller only
+          cares about read access control.
+        - ``user_password="foo"`` and ``owner_password="bar"`` -> both
+          set as given. PR 10.5 does not surface this in the dialog
+          (owner-password-driven permission changes are PR 11); the
+          field is exposed for future callers and testability.
+        - ``user_password=None`` and ``owner_password="bar"`` -> invalid.
+          The adapter rejects this case; owner-only encryption without
+          user access control is a nonsense combination for pdfprism.
+
+    ``algorithm`` is currently hard-coded to ``"AES-256"`` (PDF 2.0
+    standard). RC4 variants and AES-128 are supported by PyMuPDF but
+    not exposed in PR 10.5 -- AES-256 is the sole modern-safe default.
+    Field kept on the spec for future extensibility (algorithm picker
+    in the dialog would surface here first).
+    """
+
+    user_password: str | None
+    owner_password: str | None = None
+    algorithm: str = "AES-256"
