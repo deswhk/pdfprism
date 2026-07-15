@@ -1168,6 +1168,100 @@ is metadata sanitization.
 Fifteen PRs across five milestones. Each PR is a self-contained branch that
 merges via PR review and CI on green.
 
+### Set/Change/Remove Password (PR 10.5)
+
+PR 10.5 delivers the *writing* half of encryption support. Where PR 10
+handled opening password-protected PDFs, PR 10.5 lets users
+**set** a password on an unencrypted document, **change** the
+password on an already-encrypted one, or **remove** a password
+entirely -- each with content preservation verified end-to-end.
+
+**Adapter contract.** ``PyMuPDFAdapter.save`` gains an ``encryption:
+EncryptionSpec | None`` parameter. ``None`` preserves the current
+encryption state (PyMuPDF's own default is to STRIP encryption on a
+bare save() -- we actively counter this by re-encrypting the output
+with the stored authentication password, so an existing PR 8+ caller
+that just calls ``save()`` on an encrypted doc no longer silently
+decrypts it). An explicit ``EncryptionSpec`` overrides: ``user_password=None``
+strips encryption, ``user_password="X"`` sets/changes to X, and
+optional ``owner_password`` distinguishes read access from
+permission-change rights (owner-only encryption is rejected --
+nonsense combination for pdfprism's model). Algorithm is hard-coded
+to AES-256; a field on the spec is reserved for future dialog
+exposure of AES-128 / legacy options.
+
+**EncryptionSpec.** A ``@dataclass(frozen=True)`` in ``core/types.py``
+alongside the other value objects (``DocumentInfo``, ``PageInfo``,
+etc.). Frozen so intent can't be mutated mid-flight from service to
+adapter. Four valid combinations of the two password fields cover
+every user intent; a fifth (owner without user) is invalid and
+rejected pre-I/O.
+
+**SecurityService.** Named-intent wrappers in ``services/security.py``:
+``set_password(new)``, ``change_password(new)``, ``remove_password()``.
+Each validates the document's current state against the intent
+(``set_password`` on an already-encrypted doc raises
+``EncryptionOperationError`` -- caller should use ``change_password``)
+plus a small ``_validate_password`` guard that rejects empty and
+whitespace-only strings. No length / complexity requirements -- that
+would be paternalism; strength is the user's responsibility.
+
+**CryptDialog.** Reactive-layout modal in ``ui/dialogs/crypt.py``.
+Mode is fixed at construction time by ``is_encrypted: bool``.
+Unencrypted docs get "Set Password" mode (new + confirm fields, no
+Remove option). Encrypted docs get "Change Password" mode plus a
+"Remove password instead" checkbox that toggles into a branch where
+the password fields are disabled and OK is always enabled. OK is
+gated by (new == confirm) AND (both non-empty) OR remove-mode.
+Mismatch label surfaces only when confirm has been typed and
+differs from new -- avoids flashing the warning on every keystroke.
+
+**MainWindow integration.** A new ``File → Security`` submenu
+holds a single ``Password...`` entry that opens ``CryptDialog`` in
+the appropriate mode based on the active tab's encryption state.
+The slot dispatches to the matching ``SecurityService`` method.
+For the destructive Remove branch, a confirmation prompt
+(``QMessageBox.question`` with No as default) gates the actual
+removal -- an accidentally-produced unpassword-protected copy of a
+sensitive document would be a real data-security regression. The
+submenu is designed for expansion: PR 11 (permissions), PR 12
+(redaction), PR 13 (metadata sanitization) will slot under the same
+root without another restructure.
+
+**DocumentView delegation.** ``set_password`` / ``change_password``
+/ ``remove_password`` methods delegate to ``SecurityService`` and
+then perform a full **detach → save → rebind** dance on the
+three panels (page view, thumbnails, organize): each panel's
+``set_adapter(None)`` releases its ``pymupdf.Page`` handles, then
+``QApplication.processEvents()`` flushes any queued paint events
+against the just-detached (empty) panels, then the service call
+runs, then panels are rebound to the fresh adapter. Without the
+detach step, Qt paint events queued before the save would fire
+against stale Page handles as the adapter closes and reopens the
+underlying ``pymupdf.Document`` for an in-place encryption change.
+
+**PyMuPDF 1.27.x ``needs_pass`` de-authentication quirk.** Reading
+``Document.needs_pass`` on an authenticated encrypted doc silently
+de-authenticates it in PyMuPDF 1.27.x -- subsequent text extraction
+and rendering return empty output. The adapter now snapshots the
+encryption state exactly once during ``open()`` (into
+``self._is_encrypted_at_open``) *before* calling ``authenticate()``,
+and uses the snapshot everywhere else instead of touching
+``doc.needs_pass`` a second time. This defensive pattern would
+survive a fix upstream in PyMuPDF; it's not tied to any specific
+version. A dedicated regression class ``TestNeedsPassDoesNotDeAuthenticate``
+guards against silent regression.
+
+**Preserve-encryption invariant.** ``save(encryption=None)`` on an
+encrypted doc must reproduce the encryption on the output --
+otherwise the pre-PR-10.5 default (PyMuPDF strips encryption on a
+bare save) would silently decrypt any encrypted doc through any
+downstream save (PR 8 rotate + save, PR 9 duplicate + save, etc.).
+The adapter reads its stored ``_current_password`` (captured at
+``open()`` time) and re-applies AES-256 encryption when saving an
+encrypted doc with no explicit spec, preserving the "no accidental
+decryption" invariant.
+
 ### Milestone 1 — Reader Core
 
 - **PR 1: Foundation.** Scaffold, license, CI, branch protection (via
@@ -1256,7 +1350,7 @@ merges via PR review and CI on green.
 ### Milestone 4 — Security & OCR
 
 - PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
-- PR 10.5: Set / change / remove passwords on save; CryptDialog.
+- PR 10.5: Set / change / remove passwords on save; CryptDialog (**shipped**).
 - PR 11: Permissions (owner-password territory) and metadata sanitization.
 - PR 12: Redaction (separate PR because correctness is critical).
 - PR 13: OCR via Tesseract.

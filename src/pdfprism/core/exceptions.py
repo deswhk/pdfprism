@@ -36,3 +36,14 @@ class DocumentSaveError(PdfPrismError):
     Reasons include I/O errors, permission errors, or engine errors
     during write.
     """
+
+
+class EncryptionOperationError(PdfPrismError):
+    """Raised when an encryption operation is invalid for the current state.
+
+    Examples: calling ``set_password`` on an already-encrypted doc,
+    calling ``change_password`` on an unencrypted doc, or supplying
+    an empty / whitespace-only password. These are validation errors
+    surfaced by the service layer *before* any I/O -- distinct from
+    ``DocumentSaveError`` which surfaces actual save failures.
+    """

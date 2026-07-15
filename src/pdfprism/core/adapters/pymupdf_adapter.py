@@ -12,7 +12,15 @@ from pdfprism.core.exceptions import (
     PageOutOfRangeError,
     PasswordRequiredError,
 )
-from pdfprism.core.types import DocumentInfo, ExtractedImage, OutlineItem, PageInfo, SearchHit, Word
+from pdfprism.core.types import (
+    DocumentInfo,
+    EncryptionSpec,
+    ExtractedImage,
+    OutlineItem,
+    PageInfo,
+    SearchHit,
+    Word,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +32,14 @@ class PyMuPDFAdapter:
         self._doc: pymupdf.Document | None = None
         self._path: Path | None = None
         self._is_dirty: bool = False
+        # PR 10.5: password the current doc was authenticated with,
+        # if encrypted. None for unencrypted docs.
+        self._current_password: str | None = None
+        # PR 10.5: pre-auth snapshot of doc.needs_pass; used throughout
+        # the adapter instead of live doc.needs_pass reads. Reading
+        # doc.needs_pass on an authenticated encrypted doc in PyMuPDF
+        # 1.27.x de-authenticates it silently -- see open() docstring.
+        self._is_encrypted_at_open: bool = False
 
     def open(self, path: Path, password: str | None = None) -> None:
         if not path.exists():
@@ -35,7 +51,8 @@ class PyMuPDFAdapter:
         except Exception as exc:
             raise DocumentOpenError(f"Failed to open {path}: {exc}") from exc
 
-        if doc.needs_pass:
+        was_encrypted = bool(doc.needs_pass)
+        if was_encrypted:
             if password is None or not doc.authenticate(password):
                 doc.close()
                 raise PasswordRequiredError(f"Password required for {path}")
@@ -45,13 +62,21 @@ class PyMuPDFAdapter:
         self._doc = doc
         self._path = path
         self._is_dirty = False
-        logger.info("Opened document: %s (%d pages)", path, doc.page_count)
+        # PR 10.5: remember the password so save(encryption=None)
+        # can preserve encryption on an encrypted doc. PyMuPDF's
+        # bare save() default is to STRIP encryption, which would
+        # be a data-security regression from the user's perspective.
+        self._current_password = password if was_encrypted else None
+        self._is_encrypted_at_open = was_encrypted
+        page_count = doc.page_count
+        logger.info("Opened document: %s (%d pages)", path, page_count)
 
     def close(self) -> None:
         if self._doc is not None:
             self._doc.close()
             self._doc = None
             logger.info("Closed document")
+        self._is_encrypted_at_open = False
         self._path = None
         self._is_dirty = False
 
@@ -74,7 +99,7 @@ class PyMuPDFAdapter:
             creator=meta.get("creator") or None,
             producer=meta.get("producer") or None,
             is_encrypted=bool(self._doc.is_encrypted),
-            needs_password=bool(self._doc.needs_pass),
+            needs_password=self._is_encrypted_at_open,
         )
 
     def get_page_info(self, index: int) -> PageInfo:
@@ -370,12 +395,39 @@ class PyMuPDFAdapter:
         page.set_cropbox(new_rect)
         self._is_dirty = True
 
-    def save(self, path: Path | None = None) -> None:
+    def save(
+        self,
+        path: Path | None = None,
+        encryption: EncryptionSpec | None = None,
+    ) -> None:
+        """Save the document.
+
+        Args:
+            path: destination. ``None`` saves in-place over the
+                path the document was opened from.
+            encryption: PR 10.5. ``None`` preserves the current
+                encryption state (PyMuPDF default). Pass an
+                explicit ``EncryptionSpec`` to change encryption
+                on the output file: set/change a password, or
+                remove one. See ``EncryptionSpec`` docstring for
+                the four valid combinations of user/owner
+                password fields.
+
+        Raises:
+            DocumentSaveError: on any I/O or PyMuPDF failure, or
+                on an invalid ``EncryptionSpec`` (owner-only
+                encryption without a user password is rejected).
+        """
         self._require_open()
         assert self._doc is not None
         target = path if path is not None else self._path
         if target is None:
             raise DocumentSaveError("Cannot save: no destination path")
+
+        # Resolve encryption kwargs before touching disk so an
+        # invalid spec fails fast (no temp file left behind).
+        save_kwargs = self._encryption_save_kwargs(encryption)
+
         try:
             # incremental=False forces a full rewrite. For in-place save
             # over the same path PyMuPDF requires incremental=True OR a
@@ -383,20 +435,92 @@ class PyMuPDFAdapter:
             # operations (delete, insert) are incompatible with incremental.
             if target == self._path:
                 tmp = target.with_suffix(target.suffix + ".pdfprism-tmp")
-                self._doc.save(str(tmp))
+                self._doc.save(str(tmp), **save_kwargs)
                 # Close the open document before swapping the file
                 # because Windows may hold the file lock.
                 self._doc.close()
                 self._doc = None
                 tmp.replace(target)
-                # Re-open the saved document so the adapter stays usable.
+                # Re-open the saved document. If we just wrote an
+                # encrypted output the caller (service layer) is
+                # responsible for authenticating; the adapter leaves
+                # it locked so any subsequent operation raises
+                # DocumentOpenError until authenticate() is called.
                 self._doc = pymupdf.open(str(target))
+                # PR 10.5: snapshot needs_pass BEFORE authenticate (see open() note).
+                reopened_needs_pass = bool(self._doc.needs_pass)
+                if reopened_needs_pass:
+                    # PR 10.5: refresh _current_password after encryption change.
+                    # If the caller supplied a new spec, use its password;
+                    # if this was a preserve save, _current_password is
+                    # already correct.
+                    if encryption is not None:
+                        self._current_password = encryption.user_password or ""
+                    self._doc.authenticate(self._current_password or "")
+                    # PR 10.5: reflect the post-save encryption state in our snapshot.
+                    self._is_encrypted_at_open = True
+                elif encryption is not None and encryption.user_password is None:
+                    # Encryption was just removed. Clear the stored password.
+                    self._current_password = None
+                    self._is_encrypted_at_open = False
             else:
-                self._doc.save(str(target))
+                self._doc.save(str(target), **save_kwargs)
                 self._path = target
         except (OSError, RuntimeError) as exc:
             raise DocumentSaveError(f"Save failed: {exc}") from exc
         self._is_dirty = False
+
+    def _encryption_save_kwargs(
+        self,
+        spec: EncryptionSpec | None,
+    ) -> dict:
+        """Translate an ``EncryptionSpec`` into PyMuPDF save kwargs.
+
+        ``None`` on ``spec`` means 'preserve current encryption state'
+        (PR 10.5 preserve-encryption invariant). PyMuPDF's default on
+        a bare save() is to STRIP encryption, so when the current doc
+        is encrypted we must explicitly re-encrypt the output with
+        the stored password. Unencrypted -> unencrypted output;
+        encrypted -> encrypted output. No accidental decryption.
+
+        Invalid specs (owner_password set with user_password=None)
+        raise ``DocumentSaveError`` before any I/O happens.
+        """
+        if spec is None:
+            # PR 10.5 preserve-encryption invariant.
+            if self._doc is not None and self._is_encrypted_at_open:
+                if self._current_password is None:
+                    # Should never happen -- open() only succeeds if
+                    # a password authenticated -- but guard anyway.
+                    raise DocumentSaveError("Cannot preserve encryption: no stored password")
+                return {
+                    "encryption": pymupdf.PDF_ENCRYPT_AES_256,
+                    "user_pw": self._current_password,
+                    "owner_pw": self._current_password,
+                }
+            return {}
+        if spec.user_password is None and spec.owner_password is not None:
+            raise DocumentSaveError(
+                "Invalid EncryptionSpec: owner_password requires a "
+                "user_password (owner-only encryption is not supported)."
+            )
+        if spec.user_password is None:
+            # Remove encryption: strip both passwords and use NONE.
+            return {
+                "encryption": pymupdf.PDF_ENCRYPT_NONE,
+                "user_pw": "",
+                "owner_pw": "",
+            }
+        # Add or change password.
+        # Owner password defaults to user_password when unspecified.
+        owner = spec.owner_password if spec.owner_password is not None else spec.user_password
+        # PR 10.5 hard-codes AES-256; algorithm field on the spec
+        # is reserved for future dialog exposure.
+        return {
+            "encryption": pymupdf.PDF_ENCRYPT_AES_256,
+            "user_pw": spec.user_password,
+            "owner_pw": owner,
+        }
 
     def new_document(self) -> None:
         """Open a new empty in-memory PDF; close any prior open doc."""

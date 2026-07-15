@@ -1517,3 +1517,502 @@ class TestOpenNonPasswordFailurePath:
         main_window._open_path(missing_pdf_path)
         assert main_window._tab_widget.count() == 0
         assert constructed == []
+
+
+# ---- PR 10.5: File -> Security -> Password -------------------------------
+
+
+class _CryptDialogStub:
+    """Stub for CryptDialog: preprogrammed exec result + password/remove state."""
+
+    def __init__(
+        self,
+        exec_result: int,
+        new_password: str = "",
+        remove_requested: bool = False,
+    ):
+        self._exec_result = exec_result
+        self._new_password = new_password
+        self._remove_requested = remove_requested
+        self.constructed_with: tuple | None = None
+
+    def make_class(self):
+        stub_self = self
+
+        class _StubDialog:
+            def __init__(self, is_encrypted, filename, parent=None):
+                stub_self.constructed_with = (is_encrypted, filename)
+
+            def exec(self):
+                return stub_self._exec_result
+
+            @property
+            def new_password(self):
+                return stub_self._new_password
+
+            @property
+            def remove_requested(self):
+                return stub_self._remove_requested
+
+        return _StubDialog
+
+
+class TestSecurityPasswordAction:
+    """The File -> Security -> Password... action's existence and menu placement."""
+
+    def test_action_exists(self, main_window: MainWindow) -> None:
+        assert hasattr(main_window, "act_security_password")
+        assert main_window.act_security_password.text() == "&Password..."
+
+    def test_action_disabled_empty_state(self, main_window: MainWindow) -> None:
+        """Negative: no tab open -> action disabled."""
+        assert main_window.act_security_password.isEnabled() is False
+
+    def test_action_enabled_with_unencrypted_tab(
+        self, main_window: MainWindow, sample_pdf_path: Path
+    ) -> None:
+        """Positive: unencrypted tab open -> action enabled."""
+        main_window._open_path(sample_pdf_path)
+        assert main_window.act_security_password.isEnabled() is True
+
+    def test_action_enabled_with_encrypted_tab(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: encrypted tab open (post-authentication) -> enabled."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui import main_window as mw_mod
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        # Auto-answer the password prompt so the tab opens.
+        pw_script = _PasswordDialogStub([(QDialog.DialogCode.Accepted, ENCRYPTED_PDF_PASSWORD)])
+        monkeypatch.setattr(mw_mod, "PasswordDialog", pw_script.make_class())
+
+        main_window._open_path(encrypted_pdf_path)
+        assert main_window.act_security_password.isEnabled() is True
+
+    def test_action_present_in_security_menu(self, main_window: MainWindow) -> None:
+        """Positive: action lives in File -> Security submenu (discoverability)."""
+        # Find File menu, then Security submenu
+        from PySide6.QtWidgets import QMenu
+
+        menus = main_window.findChildren(QMenu)
+        security = next((m for m in menus if m.title() == "Se&curity"), None)
+        assert security is not None, "File -> Security submenu missing"
+        assert main_window.act_security_password in security.actions()
+
+
+class TestSecurityPasswordSlotSetPassword:
+    """Slot flow: unencrypted doc + Set Password."""
+
+    def test_accepted_dialog_calls_set_password(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: unencrypted tab + Accepted CryptDialog -> tab.set_password called."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        stub = _CryptDialogStub(
+            exec_result=QDialog.DialogCode.Accepted,
+            new_password="hunter2",
+            remove_requested=False,
+        )
+        monkeypatch.setattr(mw_mod, "CryptDialog", stub.make_class())
+
+        called_with: list = []
+        monkeypatch.setattr(
+            main_window._active_tab,
+            "set_password",
+            lambda pw: called_with.append(pw),
+        )
+        main_window._on_security_password()
+        assert called_with == ["hunter2"]
+        # Dialog was constructed with is_encrypted=False
+        assert stub.constructed_with[0] is False
+
+    def test_cancel_does_not_call_service(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative: Rejected dialog -> no service call."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        stub = _CryptDialogStub(
+            exec_result=QDialog.DialogCode.Rejected,
+        )
+        monkeypatch.setattr(mw_mod, "CryptDialog", stub.make_class())
+
+        called: list = []
+        monkeypatch.setattr(
+            main_window._active_tab,
+            "set_password",
+            lambda pw: called.append(pw),
+        )
+        main_window._on_security_password()
+        assert called == []
+
+
+class TestSecurityPasswordSlotChangePassword:
+    """Slot flow: encrypted doc + Change Password."""
+
+    def test_accepted_dialog_calls_change_password(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: encrypted tab + Accepted (no remove) -> tab.change_password."""
+        from PySide6.QtWidgets import QDialog
+
+        from pdfprism.ui import main_window as mw_mod
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        pw_script = _PasswordDialogStub([(QDialog.DialogCode.Accepted, ENCRYPTED_PDF_PASSWORD)])
+        monkeypatch.setattr(mw_mod, "PasswordDialog", pw_script.make_class())
+        main_window._open_path(encrypted_pdf_path)
+
+        stub = _CryptDialogStub(
+            exec_result=QDialog.DialogCode.Accepted,
+            new_password="new_pw",
+            remove_requested=False,
+        )
+        monkeypatch.setattr(mw_mod, "CryptDialog", stub.make_class())
+
+        called_with: list = []
+        monkeypatch.setattr(
+            main_window._active_tab,
+            "change_password",
+            lambda pw: called_with.append(pw),
+        )
+        main_window._on_security_password()
+        assert called_with == ["new_pw"]
+        # Dialog was constructed with is_encrypted=True
+        assert stub.constructed_with[0] is True
+
+
+class TestSecurityPasswordSlotRemovePassword:
+    """Slot flow: encrypted doc + Remove Password (with confirmation)."""
+
+    def test_remove_yes_confirmation_calls_remove_password(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: Remove branch + Yes confirmation -> tab.remove_password."""
+        from PySide6.QtWidgets import QDialog, QMessageBox
+
+        from pdfprism.ui import main_window as mw_mod
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        pw_script = _PasswordDialogStub([(QDialog.DialogCode.Accepted, ENCRYPTED_PDF_PASSWORD)])
+        monkeypatch.setattr(mw_mod, "PasswordDialog", pw_script.make_class())
+        main_window._open_path(encrypted_pdf_path)
+
+        stub = _CryptDialogStub(
+            exec_result=QDialog.DialogCode.Accepted,
+            remove_requested=True,
+        )
+        monkeypatch.setattr(mw_mod, "CryptDialog", stub.make_class())
+
+        # Auto-answer confirmation Yes
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **k: QMessageBox.StandardButton.Yes,
+        )
+
+        called: list = []
+        monkeypatch.setattr(
+            main_window._active_tab,
+            "remove_password",
+            lambda: called.append(True),
+        )
+        main_window._on_security_password()
+        assert called == [True]
+
+    def test_remove_no_confirmation_skips_call(
+        self,
+        main_window: MainWindow,
+        encrypted_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative: Remove + No confirmation -> no service call."""
+        from PySide6.QtWidgets import QDialog, QMessageBox
+
+        from pdfprism.ui import main_window as mw_mod
+        from tests.conftest import ENCRYPTED_PDF_PASSWORD
+
+        pw_script = _PasswordDialogStub([(QDialog.DialogCode.Accepted, ENCRYPTED_PDF_PASSWORD)])
+        monkeypatch.setattr(mw_mod, "PasswordDialog", pw_script.make_class())
+        main_window._open_path(encrypted_pdf_path)
+
+        stub = _CryptDialogStub(
+            exec_result=QDialog.DialogCode.Accepted,
+            remove_requested=True,
+        )
+        monkeypatch.setattr(mw_mod, "CryptDialog", stub.make_class())
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **k: QMessageBox.StandardButton.No,
+        )
+
+        called: list = []
+        monkeypatch.setattr(
+            main_window._active_tab,
+            "remove_password",
+            lambda: called.append(True),
+        )
+        main_window._on_security_password()
+        assert called == []
+
+
+class TestSecurityPasswordSlotErrorHandling:
+    """Errors from the service layer are surfaced via critical dialog."""
+
+    def test_encryption_operation_error_shows_critical(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative: EncryptionOperationError -> critical dialog, no crash."""
+        from PySide6.QtWidgets import QDialog, QMessageBox
+
+        from pdfprism.core.exceptions import EncryptionOperationError
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        stub = _CryptDialogStub(
+            exec_result=QDialog.DialogCode.Accepted,
+            new_password="hunter2",
+        )
+        monkeypatch.setattr(mw_mod, "CryptDialog", stub.make_class())
+
+        def raiser(pw):
+            raise EncryptionOperationError("test error")
+
+        monkeypatch.setattr(main_window._active_tab, "set_password", raiser)
+
+        critical_shown: list = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "critical",
+            lambda *a, **k: critical_shown.append(a[2] if len(a) > 2 else k.get("text")),
+        )
+        # Must not raise
+        main_window._on_security_password()
+        assert len(critical_shown) == 1
+
+    def test_document_save_error_shows_critical(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Negative: DocumentSaveError -> critical dialog, no crash."""
+        from PySide6.QtWidgets import QDialog, QMessageBox
+
+        from pdfprism.core.exceptions import DocumentSaveError
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        stub = _CryptDialogStub(
+            exec_result=QDialog.DialogCode.Accepted,
+            new_password="hunter2",
+        )
+        monkeypatch.setattr(mw_mod, "CryptDialog", stub.make_class())
+
+        def raiser(pw):
+            raise DocumentSaveError("disk full")
+
+        monkeypatch.setattr(main_window._active_tab, "set_password", raiser)
+
+        critical_shown: list = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "critical",
+            lambda *a, **k: critical_shown.append(True),
+        )
+        main_window._on_security_password()
+        assert critical_shown == [True]
+
+
+class TestSecurityPasswordSlotNoActiveTab:
+    """Guard: slot is a no-op when no tab is open."""
+
+    def test_no_active_tab_is_noop(self, main_window: MainWindow, monkeypatch) -> None:
+        """Negative: no tab -> no CryptDialog constructed."""
+        from pdfprism.ui import main_window as mw_mod
+
+        constructed: list = []
+
+        class _ExplodeCrypt:
+            def __init__(self, *a, **k):
+                constructed.append(True)
+
+        monkeypatch.setattr(mw_mod, "CryptDialog", _ExplodeCrypt)
+
+        assert main_window._active_tab is None
+        main_window._on_security_password()  # must not raise
+        assert constructed == []
+
+
+# ---- PR 10.5 regression: password ops must rebind panels + clear cache ---
+
+
+class TestSecurityPasswordPanelRebind:
+    """Regression guard for the AES-decryption-error bug caught in smoke test.
+
+    After in-place save with encryption change, the adapter's underlying
+    pymupdf.Document is closed and reopened. Any Page handles held by the
+    panels are stale references into the previous Document; MuPDF then
+    decrypts content streams with the OLD crypt keys, producing
+    'aes padding out of range' + 'syntax error in content stream' spam.
+
+    These tests verify that DocumentView.set_password / change_password /
+    remove_password call ``set_adapter`` on every panel (rebind) and clear
+    the page cache. Without this the visible output is corrupted.
+    """
+
+    def _install_rebind_spy(self, monkeypatch, tab, cache_cleared: list, rebinds: dict) -> None:
+        monkeypatch.setattr(
+            tab._page_cache,
+            "clear",
+            lambda: cache_cleared.append(True),
+        )
+        monkeypatch.setattr(
+            tab._thumbnail_panel,
+            "set_adapter",
+            lambda a: rebinds.setdefault("thumbnail", []).append(a),
+        )
+        monkeypatch.setattr(
+            tab._organize_panel,
+            "set_adapter",
+            lambda a: rebinds.setdefault("organize", []).append(a),
+        )
+        monkeypatch.setattr(
+            tab._page_view,
+            "set_adapter",
+            lambda a: rebinds.setdefault("page_view", []).append(a),
+        )
+
+    def test_set_password_triggers_rebind(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: set_password clears cache and rebinds all three panels."""
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+
+        cache_cleared: list = []
+        rebinds: dict = {}
+        self._install_rebind_spy(monkeypatch, tab, cache_cleared, rebinds)
+
+        # Also stub the service to avoid actual file I/O.
+        from pdfprism.services import security as svc_mod
+
+        class _NoopService:
+            def __init__(self, adapter):
+                self._adapter = adapter
+
+            def set_password(self, pw):
+                pass
+
+        monkeypatch.setattr(svc_mod, "SecurityService", _NoopService)
+
+        tab.set_password("test")
+        # PR 10.5 detach->save->rebind: each panel's set_adapter is
+        # called TWICE. First with None (detach before save so no
+        # widget holds a page handle during the in-place doc swap),
+        # then with the fresh adapter (rebind after save).
+        assert cache_cleared == [True]
+        for panel in ("thumbnail", "organize", "page_view"):
+            assert panel in rebinds, f"{panel} not rebound"
+            assert len(rebinds[panel]) == 2, (
+                f"{panel} expected 2 set_adapter calls (detach + rebind), got {len(rebinds[panel])}"
+            )
+            assert rebinds[panel][0] is None, f"{panel} first call must be None (detach)"
+            assert rebinds[panel][1] is tab._adapter, (
+                f"{panel} second call must be the current adapter (rebind)"
+            )
+
+    def test_change_password_triggers_rebind(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: change_password clears cache + rebinds panels."""
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+
+        cache_cleared: list = []
+        rebinds: dict = {}
+        self._install_rebind_spy(monkeypatch, tab, cache_cleared, rebinds)
+
+        from pdfprism.services import security as svc_mod
+
+        class _NoopService:
+            def __init__(self, adapter):
+                self._adapter = adapter
+
+            def change_password(self, pw):
+                pass
+
+        monkeypatch.setattr(svc_mod, "SecurityService", _NoopService)
+
+        tab.change_password("newpw")
+        assert cache_cleared == [True]
+        for panel in ("thumbnail", "organize", "page_view"):
+            assert len(rebinds.get(panel, [])) == 2
+            assert rebinds[panel][0] is None
+            assert rebinds[panel][1] is tab._adapter
+
+    def test_remove_password_triggers_rebind(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: remove_password clears cache + rebinds panels."""
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+
+        cache_cleared: list = []
+        rebinds: dict = {}
+        self._install_rebind_spy(monkeypatch, tab, cache_cleared, rebinds)
+
+        from pdfprism.services import security as svc_mod
+
+        class _NoopService:
+            def __init__(self, adapter):
+                self._adapter = adapter
+
+            def remove_password(self):
+                pass
+
+        monkeypatch.setattr(svc_mod, "SecurityService", _NoopService)
+
+        tab.remove_password()
+        assert cache_cleared == [True]
+        for panel in ("thumbnail", "organize", "page_view"):
+            assert len(rebinds.get(panel, [])) == 2
+            assert rebinds[panel][0] is None
+            assert rebinds[panel][1] is tab._adapter
