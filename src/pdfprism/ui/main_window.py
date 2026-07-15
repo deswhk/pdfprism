@@ -23,7 +23,10 @@ from PySide6.QtWidgets import (
 
 from pdfprism.config import MAX_RECENT_FILES
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
-from pdfprism.core.exceptions import PdfPrismError
+from pdfprism.core.exceptions import (
+    PasswordRequiredError,
+    PdfPrismError,
+)
 from pdfprism.core.types import CrossDocHit
 from pdfprism.services.extract import ExtractService
 from pdfprism.services.pages import PageService
@@ -36,6 +39,7 @@ from pdfprism.ui.dialogs.extract_pages import ExtractPagesDialog
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
 from pdfprism.ui.dialogs.insert_pages import InsertPagesDialog
 from pdfprism.ui.dialogs.merge import MergeDialog
+from pdfprism.ui.dialogs.password import PasswordDialog
 from pdfprism.ui.dialogs.split import SplitDialog
 from pdfprism.ui.theme import DARK_QSS
 from pdfprism.ui.widgets.document_view import DocumentView
@@ -693,13 +697,13 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
-        doc_view = DocumentView(path, self)
-        try:
-            doc_view.open()
-        except PdfPrismError as exc:
-            logger.exception("Failed to open %s", path)
-            doc_view.deleteLater()
-            QMessageBox.critical(self, "Open failed", str(exc))
+        # First attempt with no password. Encrypted PDFs raise
+        # PasswordRequiredError; _try_open dispatches to the
+        # password prompt + retry loop when that happens.
+        doc_view = self._try_open(path, password=None)
+        if doc_view is None:
+            # Either non-password failure (already surfaced to user)
+            # or user cancelled the password prompt.
             return
 
         tab_idx = self._add_tab(doc_view)
@@ -1495,6 +1499,64 @@ class MainWindow(QMainWindow):
         self.act_extract_selection.setEnabled(has_selection)
         # Merge requires at least 2 open tabs.
         self.act_merge.setEnabled(self._tab_widget.count() >= 2)
+
+    def _try_open(self, path: Path, password: str | None) -> DocumentView | None:
+        """Attempt to open ``path`` with an optional password.
+
+        Returns the constructed and opened ``DocumentView`` on
+        success. Returns ``None`` in two failure modes:
+        (1) a non-password open failure was surfaced to the user
+        via a critical dialog, or (2) the user cancelled the
+        password prompt loop.
+
+        On ``PasswordRequiredError`` this method delegates to
+        ``_prompt_for_password`` which runs the retry loop.
+        """
+        doc_view = DocumentView(path, self)
+        try:
+            doc_view.open(password=password)
+        except PasswordRequiredError:
+            doc_view.deleteLater()
+            return self._prompt_for_password(path)
+        except PdfPrismError as exc:
+            logger.exception("Failed to open %s", path)
+            doc_view.deleteLater()
+            QMessageBox.critical(self, "Open failed", str(exc))
+            return None
+        return doc_view
+
+    def _prompt_for_password(self, path: Path) -> DocumentView | None:
+        """Show a PasswordDialog and retry open() until success or Cancel.
+
+        The dialog instance is reused across attempts so the
+        modal stays in the same screen position and the retry
+        loop feels like one continuous interaction. Wrong-
+        password attempts show an inline banner via
+        ``set_error_message``. Unlimited retries; the user
+        cancels via Cancel or Esc, at which point we return
+        ``None``.
+        """
+        dlg = PasswordDialog(path.name, self)
+        while True:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                # User cancelled: give up quietly. Path is not
+                # added to Recent Files (no successful open).
+                return None
+            password = dlg.password
+            doc_view = DocumentView(path, self)
+            try:
+                doc_view.open(password=password)
+                return doc_view
+            except PasswordRequiredError:
+                # Wrong password. Show inline error, keep looping.
+                doc_view.deleteLater()
+                dlg.set_error_message("Incorrect password. Try again.")
+            except PdfPrismError as exc:
+                # Any other error post-auth: surface + give up.
+                logger.exception("Failed to open %s", path)
+                doc_view.deleteLater()
+                QMessageBox.critical(self, "Open failed", str(exc))
+                return None
 
     def _prompt_unsaved_changes(self, doc_view: DocumentView) -> bool:
         """Modal prompt for a modified document.

@@ -84,7 +84,7 @@ src/pdfprism/
 ├── services/                    # Pure-logic operations on documents
 │   ├── search.py                # PR 4/4.5/6: per-doc + cross-doc text search; SearchScope enum
 │   ├── pages.py                 # PR 8: rotate, delete, insert, reorder, etc.
-│   ├── security.py              # PR 10: password, permissions, sanitize
+│   ├── security.py              # PR 10.5+: set/change/remove password, permissions, sanitize
 │   ├── redaction.py             # PR 11: true content removal
 │   ├── ocr.py                   # PR 12: Tesseract pipeline
 │   ├── extract.py               # PR 7: text + image extraction, snippet_around
@@ -102,7 +102,7 @@ src/pdfprism/
 │   │   ├── search_results_panel.py  # PR 6: cross-doc search results tree
 │   │   ├── thumbnail_panel.py   # QListView thumbnail strip
 │   │   └── outline_panel.py     # QTreeView outline (TOC)
-│   └── dialogs/                 # goto_page; extract (PR 7); crop (PR 8); extract_pages/insert_pages/split/merge (PR 8.5); password (PR 10+)
+│   └── dialogs/                 # goto_page; extract (PR 7); crop (PR 8); extract_pages/insert_pages/split/merge (PR 8.5); password prompt (PR 10); crypt/permissions (PR 10.5+)
 ├── config.py                    # App constants (name, org, MAX_RECENT_FILES, etc.)
 ├── logging_config.py            # Stdlib logging setup
 └── app.py                       # Entry point
@@ -1094,6 +1094,75 @@ becomes the logger name.
 - **Autouse `qapp`.** `tests/ui/conftest.py` declares an autouse fixture
   that pulls in pytest-qt's `qapp`.
 
+## Milestone 4 — Security
+
+Milestone 4 is where pdfprism grows write-side capabilities that
+require *permission* to touch a PDF's protected surfaces: opening
+encrypted files, adding or removing passwords, changing permission
+flags, sanitizing metadata, and eventually true content redaction.
+Each is a distinct PR with its own design surface.
+
+### Encrypted PDFs (PR 10)
+
+PR 10 delivers the *reading* half of encryption support: opening a
+password-protected PDF from anywhere the app already accepts an open
+(File → Open..., Recent Files, drag-and-drop). Setting, changing,
+or removing passwords on save is deferred to PR 10.5 where the
+CryptDialog + permission grid come in; PR 10 stays focused on the
+open path because that's the largest UX gap today (encrypted PDFs
+are effectively unopenable in the app pre-PR-10, which is a
+functional bug not a missing feature).
+
+**Adapter contract.** ``PyMuPDFAdapter.open`` already accepted a
+``password: str | None`` parameter as of PR 1 -- the plumbing was
+there, just unused. PR 10 exercises it. Silent-ignore semantics on
+unencrypted PDFs (design invariant Q4) let callers pass a password
+without first probing ``needs_password``; PyMuPDF's
+``Document.authenticate()`` no-ops when the doc isn't encrypted.
+A failed authentication closes the underlying doc and clears the
+adapter's state so a caller can retry cleanly on the same instance
+(regression-tested).
+
+**PasswordDialog.** A simple modal in ``ui/dialogs/password.py``
+with a masked ``QLineEdit``, a show-password checkbox, and an
+optional inline error label that surfaces the retry-loop message
+"Incorrect password. Try again." The dialog is **reusable across
+retries** by design: the caller keeps the same instance, calls
+``set_error_message`` after a failed attempt, and re-invokes
+``exec()``. This keeps the modal in the same screen position and
+avoids per-attempt construction cost. ``set_error_message(None)``
+hides the label; any non-empty string shows it, clears the input
+field, and returns focus to the input.
+
+**MainWindow retry loop.** ``_open_path`` now dispatches through a
+small helper pair. ``_try_open`` is the one-shot path -- attempt
+``open(password=...)``, surface a critical dialog for non-password
+failures, or delegate to ``_prompt_for_password`` on
+``PasswordRequiredError``. ``_prompt_for_password`` runs the retry
+loop: reuse the ``PasswordDialog``, exec, either succeed and
+return the ``DocumentView`` or catch ``PasswordRequiredError``,
+call ``set_error_message``, and loop. Cancel returns ``None`` and
+takes ``_open_path`` down its "no tab, no Recent Files entry"
+branch.
+
+**No password caching.** Passwords are never stored beyond the
+lifetime of a single ``_prompt_for_password`` invocation.
+Re-opening the same file from Recent Files re-prompts (design
+invariant Q5). This is a deliberate security choice for PR 10 --
+an opt-in OS-keychain integration is a possible future feature but
+belongs to its own PR, not silently bolted onto password support.
+
+**Deferred to later PRs.** PR 10.5 will add the *writing* half of
+encryption: a CryptDialog for Save-As-Encrypted / Set Password /
+Change Password / Remove Password, plus the ``services/security.py``
+module that owns the ``save(..., encryption=..., user_pw=...,
+owner_pw=...)`` orchestration. Distinguishing the user password
+(opens the doc) from the owner password (unlocks permission
+changes) surfaces at that point; PR 10 only needs "authenticated
+or not". PR 11 is permissions (owner-password territory). PR 12
+is metadata sanitization.
+
+
 ## Roadmap
 
 Fifteen PRs across five milestones. Each PR is a self-contained branch that
@@ -1186,9 +1255,11 @@ merges via PR review and CI on green.
 
 ### Milestone 4 — Security & OCR
 
-- PR 10: Password protect, permissions, metadata sanitization.
-- PR 11: Redaction (separate PR because correctness is critical).
-- PR 12: OCR via Tesseract.
+- PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
+- PR 10.5: Set / change / remove passwords on save; CryptDialog.
+- PR 11: Permissions (owner-password territory) and metadata sanitization.
+- PR 12: Redaction (separate PR because correctness is critical).
+- PR 13: OCR via Tesseract.
 
 ### Milestone 5 — Advanced
 
