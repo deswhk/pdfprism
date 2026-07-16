@@ -101,6 +101,9 @@ class PageView(QGraphicsView):
     # PR 12: emitted on redaction drag release with (page_index, rect)
     # where rect is (x0, y0, x1, y1) in PDF-space points.
     redaction_requested = Signal(int, tuple)
+    # PR 12.1: emitted on "Redact Selection" context menu click.
+    # Payload: (page_index, list of Word objects).
+    redact_selection_requested = Signal(int, list)
 
     def __init__(
         self,
@@ -622,7 +625,17 @@ class PageView(QGraphicsView):
         extract_action = menu.addAction("&Extract Selection to File...")
         extract_action.setEnabled(has_selection)
         extract_action.triggered.connect(self.extract_selection_requested.emit)
+        # PR 12.1: text-selection redaction.
+        redact_action = menu.addAction("Redact &Selection")
+        redact_action.setEnabled(has_selection)
+        redact_action.triggered.connect(self._on_redact_selection)
         menu.exec(event.globalPos())
+
+    def _on_redact_selection(self) -> None:
+        """PR 12.1: package current selection + emit redact_selection_requested."""
+        if not self._selected_words:
+            return
+        self.redact_selection_requested.emit(self._current_page, list(self._selected_words))
 
     def _current_pixmap_item(self) -> QGraphicsPixmapItem | None:
         if not self._pixmap_items:

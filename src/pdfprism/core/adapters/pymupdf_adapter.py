@@ -195,6 +195,45 @@ class PyMuPDFAdapter:
         page.add_redact_annot(rect, **kwargs)
         self._is_dirty = True
 
+    def add_redactions_for_words(self, page_index: int, words: list["Word"]) -> int:
+        """PR 12.1: create one redaction annotation per Word.
+
+        Used by the text-selection redaction path -- user selects text
+        via SELECT mode, right-clicks, chooses "Redact Selection".
+        Each selected Word gets its own redact_annot with the word's
+        rect. Per-word rects (rather than a union rect) avoid
+        redacting whitespace between multi-line selections and unrelated
+        content in multi-column layouts.
+
+        Args:
+            page_index: Page these words belong to.
+            words: Word objects from the current selection. Empty list
+                is a no-op returning 0.
+
+        Returns:
+            Count of redactions added (== len(words)).
+
+        Marks the document dirty when at least one redaction is added.
+        """
+        self._require_open()
+        assert self._doc is not None
+        if not words:
+            return 0
+        if not 0 <= page_index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {page_index} out of range [0, {self._doc.page_count})"
+            )
+        page = self._doc[page_index]
+        for word in words:
+            rect = pymupdf.Rect(word.x0, word.y0, word.x1, word.y1)
+            page.add_redact_annot(
+                rect,
+                fill=(0.0, 0.0, 0.0),  # black, matching session defaults
+                cross_out=True,
+            )
+        self._is_dirty = True
+        return len(words)
+
     def list_redactions(self) -> list[Redaction]:
         """Return all pending redaction annotations in page-major order.
 

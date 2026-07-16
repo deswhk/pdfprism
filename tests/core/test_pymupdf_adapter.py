@@ -1632,3 +1632,53 @@ class TestApplyRedactions:
             assert adapter.list_redactions() == []
         finally:
             adapter.close()
+
+
+class TestAddRedactionsForWords:
+    """PR 12.1: batch redaction from Word list."""
+
+    def test_batch_adds_per_word(self, mutable_pdf_path: Path) -> None:
+        """Positive: N Words -> N redaction annots + returns N."""
+        from pdfprism.core.types import Word
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            words = [
+                Word(text="A", x0=10.0, y0=10.0, x1=20.0, y1=25.0),
+                Word(text="B", x0=25.0, y0=10.0, x1=40.0, y1=25.0),
+                Word(text="C", x0=45.0, y0=10.0, x1=60.0, y1=25.0),
+            ]
+            count = adapter.add_redactions_for_words(page_index=0, words=words)
+            assert count == 3
+            assert len(adapter.list_redactions()) == 3
+        finally:
+            adapter.close()
+
+    def test_empty_words_returns_zero(self, mutable_pdf_path: Path) -> None:
+        """Positive: empty list -> 0, dirty flag unchanged."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            assert adapter.is_dirty is False
+            count = adapter.add_redactions_for_words(page_index=0, words=[])
+            assert count == 0
+            assert adapter.is_dirty is False
+        finally:
+            adapter.close()
+
+    def test_invalid_page_index(self, mutable_pdf_path: Path) -> None:
+        """Negative: page_index out of range -> PageOutOfRangeError."""
+        from pdfprism.core.exceptions import PageOutOfRangeError
+        from pdfprism.core.types import Word
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            with pytest.raises(PageOutOfRangeError):
+                adapter.add_redactions_for_words(
+                    page_index=999,
+                    words=[Word(text="x", x0=0.0, y0=0.0, x1=10.0, y1=10.0)],
+                )
+        finally:
+            adapter.close()

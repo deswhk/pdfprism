@@ -95,3 +95,32 @@ class TestApply:
 
         svc = RedactionService(adapter)
         assert svc.apply() == 0
+
+
+class TestRedactWords:
+    """PR 12.1: service batch API."""
+
+    def test_delegates_to_adapter(self) -> None:
+        """Positive: service.redact_words -> adapter.add_redactions_for_words."""
+        from pdfprism.core.types import Word
+
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.add_redactions_for_words.return_value = 2
+        svc = RedactionService(adapter)
+
+        words = [
+            Word(text="A", x0=0.0, y0=0.0, x1=10.0, y1=10.0),
+            Word(text="B", x0=15.0, y0=0.0, x1=25.0, y1=10.0),
+        ]
+        got = svc.redact_words(page_index=0, words=words)
+
+        assert got == 2
+        adapter.add_redactions_for_words.assert_called_once_with(0, words)
+
+    def test_empty_words_returns_zero(self) -> None:
+        """Positive: empty list passed through -> 0 from adapter."""
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.add_redactions_for_words.return_value = 0
+
+        svc = RedactionService(adapter)
+        assert svc.redact_words(page_index=0, words=[]) == 0

@@ -83,6 +83,10 @@ class DocumentView(QWidget):
         # pymupdf.Document is not closed/reopened.
         self._page_view.redaction_requested.connect(self._on_redaction_requested)
 
+        # PR 12.1: text-selection redaction (right-click on selected text).
+        # Payload: (page_index, list of Word objects).
+        self._page_view.redact_selection_requested.connect(self._on_redact_selection_requested)
+
         # OrganizePagesPanel: panel emits intent, we route through the
         # corresponding mutation methods. Each one already does the
         # adapter mutation + cache clear + panel re-bind + modified-
@@ -459,6 +463,21 @@ class DocumentView(QWidget):
         # The page_cache holds a rendered pixmap that does NOT
         # include the annotation we just added; invalidate and
         # trigger a repaint via a set_adapter rebind.
+        self._page_cache.clear()
+        self._page_view.set_adapter(self._adapter)
+        self._thumbnail_panel.set_adapter(self._adapter)
+
+    def _on_redact_selection_requested(self, page_index: int, words: list) -> None:
+        """PR 12.1: Slot -- selected-text redaction. Per-word rects."""
+        from pdfprism.services.redaction import RedactionService
+
+        count = RedactionService(self._adapter).redact_words(page_index, words)
+        if not count:
+            return
+        # Clear the text selection now that we've committed it as redactions.
+        self._page_view.clear_selection()
+        self._refresh_modified()
+        # Re-render since new annotations changed the doc.
         self._page_cache.clear()
         self._page_view.set_adapter(self._adapter)
         self._thumbnail_panel.set_adapter(self._adapter)

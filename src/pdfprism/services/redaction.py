@@ -68,6 +68,24 @@ class RedactionService:
         self._adapter.add_redaction(redaction)
         logger.info("Redaction added on page %d: rect=%s", page_index, rect)
 
+    def redact_words(self, page_index: int, words: list) -> int:
+        """PR 12.1: batch redact each Word in the selection.
+
+        Delegates to adapter's add_redactions_for_words. See there for
+        semantics (per-word rects, session-default fill).
+
+        Args:
+            page_index: Page these words belong to.
+            words: Word objects to redact. Empty list is a no-op.
+
+        Returns:
+            Count of redactions added.
+        """
+        count = self._adapter.add_redactions_for_words(page_index, words)
+        if count:
+            logger.info("Redacted %d word(s) on page %d", count, page_index)
+        return count
+
     def list_redactions(self) -> list[Redaction]:
         """Return all pending redactions in page-major order."""
         return self._adapter.list_redactions()
