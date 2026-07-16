@@ -39,8 +39,16 @@ class RedactionService:
     adapter mutations.
     """
 
-    def __init__(self, adapter: PyMuPDFAdapter) -> None:
+    def __init__(
+        self,
+        adapter: PyMuPDFAdapter,
+        *,
+        fill_color: tuple[int, int, int] = (0, 0, 0),
+        replacement_text: str | None = None,
+    ) -> None:
         self._adapter = adapter
+        self._fill_color = fill_color
+        self._replacement_text = replacement_text
 
     def add_redaction(
         self,
@@ -48,7 +56,7 @@ class RedactionService:
         rect: tuple[float, float, float, float],
         *,
         replacement_text: str | None = None,
-        fill_color: tuple[int, int, int] = (0, 0, 0),
+        fill_color: tuple[int, int, int] | None = None,
     ) -> None:
         """Add a pending redaction mark.
 
@@ -59,11 +67,15 @@ class RedactionService:
                 area after apply.
             fill_color: RGB 0-255 tuple; default black.
         """
+        effective_fill = fill_color if fill_color is not None else self._fill_color
+        effective_text = (
+            replacement_text if replacement_text is not None else self._replacement_text
+        )
         redaction = Redaction(
             page_index=page_index,
             rect=rect,
-            replacement_text=replacement_text,
-            fill_color=fill_color,
+            replacement_text=effective_text,
+            fill_color=effective_fill,
         )
         self._adapter.add_redaction(redaction)
         logger.info("Redaction added on page %d: rect=%s", page_index, rect)
@@ -81,7 +93,12 @@ class RedactionService:
         Returns:
             Count of redactions added.
         """
-        count = self._adapter.add_redactions_for_words(page_index, words)
+        count = self._adapter.add_redactions_for_words(
+            page_index,
+            words,
+            fill_color=self._fill_color,
+            replacement_text=self._replacement_text,
+        )
         if count:
             logger.info("Redacted %d word(s) on page %d", count, page_index)
         return count
@@ -98,7 +115,11 @@ class RedactionService:
         Returns:
             Count of redactions added.
         """
-        count = self._adapter.add_redactions_for_hits(hits)
+        count = self._adapter.add_redactions_for_hits(
+            hits,
+            fill_color=self._fill_color,
+            replacement_text=self._replacement_text,
+        )
         if count:
             logger.info("Redacted %d search hit(s)", count)
         return count
@@ -116,12 +137,23 @@ class RedactionService:
             redaction_index,
         )
 
-    def apply(self) -> int:
+    def apply(
+        self,
+        *,
+        images: int = 2,
+        graphics: int = 1,
+        text: int = 0,
+    ) -> int:
         """Destructively apply all pending redactions.
+
+        Args:
+            images: 0=leave, 1=blank-fill, 2=remove (PyMuPDF default 2).
+            graphics: 0=leave, 1=remove (PyMuPDF default 1).
+            text: 0=in-quad only, 1=any text sharing a line (default 0).
 
         Returns:
             Count of redactions applied. Zero if nothing was pending.
         """
-        count = self._adapter.apply_redactions()
+        count = self._adapter.apply_redactions(images=images, graphics=graphics, text=text)
         logger.info("Redactions applied: %d", count)
         return count

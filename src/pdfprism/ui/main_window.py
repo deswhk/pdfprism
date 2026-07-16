@@ -45,6 +45,7 @@ from pdfprism.ui.dialogs.insert_pages import InsertPagesDialog
 from pdfprism.ui.dialogs.merge import MergeDialog
 from pdfprism.ui.dialogs.password import PasswordDialog
 from pdfprism.ui.dialogs.properties import PropertiesDialog
+from pdfprism.ui.dialogs.redaction_options import RedactionOptionsDialog
 from pdfprism.ui.dialogs.search_redact import SearchRedactDialog
 from pdfprism.ui.dialogs.split import SplitDialog
 from pdfprism.ui.theme import DARK_QSS
@@ -76,6 +77,27 @@ class MainWindow(QMainWindow):
         self._tool_mode: ToolMode = ToolMode(
             settings.value("tool/mode", ToolMode.HAND.value, type=str)
         )
+
+        # PR 12.3: session-level redaction defaults persisted via QSettings.
+        # Fill color: stored as 3-int tuple in QSettings via json string.
+        import json as _json
+
+        raw_color = settings.value("redaction/fill_color", "[0, 0, 0]", type=str)
+        try:
+            parsed_color = _json.loads(raw_color)
+            if isinstance(parsed_color, list) and len(parsed_color) == 3:
+                self._redaction_fill_color: tuple[int, int, int] = tuple(
+                    int(c) for c in parsed_color
+                )
+            else:
+                self._redaction_fill_color = (0, 0, 0)
+        except (ValueError, TypeError):
+            self._redaction_fill_color = (0, 0, 0)
+        raw_text = settings.value("redaction/replacement_text", "", type=str)
+        self._redaction_replacement_text: str | None = raw_text or None
+        self._redaction_images: int = int(settings.value("redaction/images", 2, type=int))
+        self._redaction_graphics: int = int(settings.value("redaction/graphics", 1, type=int))
+        self._redaction_text: int = int(settings.value("redaction/text", 0, type=int))
         self._recent_menu: QMenu | None = None
         self._main_toolbar: QToolBar | None = None
         self._active_tab: DocumentView | None = None
@@ -396,6 +418,14 @@ class MainWindow(QMainWindow):
             "Search across the document and redact selected matches"
         )
 
+        # PR 12.3: session-level redaction options.
+        self.act_redaction_options = QAction("&Options...", self)
+        self.act_redaction_options.triggered.connect(self._on_redaction_options)
+        self.act_redaction_options.setEnabled(True)  # session config; always available
+        self.act_redaction_options.setToolTip(
+            "Configure redaction fill color, replacement text, and apply behavior"
+        )
+
         self.act_insert_pages = QAction("&Insert Pages from File...", self)
         self.act_insert_pages.triggered.connect(self._on_insert_pages)
         self.act_insert_pages.setEnabled(False)
@@ -564,6 +594,8 @@ class MainWindow(QMainWindow):
         redaction_menu.addAction(self.act_redaction_clear)
         redaction_menu.addSeparator()
         redaction_menu.addAction(self.act_redaction_search)
+        redaction_menu.addSeparator()
+        redaction_menu.addAction(self.act_redaction_options)
 
         view_menu.addSeparator()
         view_menu.addAction(self.act_fullscreen)
@@ -776,6 +808,7 @@ class MainWindow(QMainWindow):
         doc_view.page_view.set_tool_mode(self._tool_mode)
         doc_view.page_view.copy_requested.connect(self._on_copy)
         doc_view.page_view.extract_selection_requested.connect(self._on_extract_selection)
+        self._propagate_redaction_options()  # PR 12.3
         self._add_recent_file(path)
 
     # ----- navigation slots -----
@@ -1434,7 +1467,11 @@ class MainWindow(QMainWindow):
         if tab is None:
             return
         adapter = tab._adapter
-        service = RedactionService(adapter)
+        service = RedactionService(
+            adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        )
         pending = service.list_redactions()
         if not pending:
             QMessageBox.information(
@@ -1459,7 +1496,11 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         try:
-            count = service.apply()
+            count = service.apply(
+                images=self._redaction_images,
+                graphics=self._redaction_graphics,
+                text=self._redaction_text,
+            )
             adapter.save()
         except PdfPrismError as exc:
             QMessageBox.critical(self, "Failed to apply redactions", str(exc))
@@ -1477,7 +1518,11 @@ class MainWindow(QMainWindow):
         if tab is None:
             return
         adapter = tab._adapter
-        service = RedactionService(adapter)
+        service = RedactionService(
+            adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        )
         pending = service.list_redactions()
         if not pending:
             self.statusBar().showMessage("No pending redactions", 3000)
@@ -1513,7 +1558,11 @@ class MainWindow(QMainWindow):
         hits = dlg.selected_hits()
         if not hits:
             return
-        service = RedactionService(adapter)
+        service = RedactionService(
+            adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        )
         try:
             count = service.redact_hits(hits)
         except PdfPrismError as exc:
@@ -1526,6 +1575,54 @@ class MainWindow(QMainWindow):
         tab._page_view.set_adapter(adapter)
         tab._thumbnail_panel.set_adapter(adapter)
         self.statusBar().showMessage(f"Added {count} pending redaction(s) from search", 3000)
+
+    def _on_redaction_options(self) -> None:
+        """PR 12.3: open the Redaction Options dialog, persist on OK."""
+        dlg = RedactionOptionsDialog(
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+            images=self._redaction_images,
+            graphics=self._redaction_graphics,
+            text=self._redaction_text,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Update in-memory session state
+        self._redaction_fill_color = dlg.fill_color
+        self._redaction_replacement_text = dlg.replacement_text
+        self._redaction_images = dlg.images
+        self._redaction_graphics = dlg.graphics
+        self._redaction_text = dlg.text_mode
+        # Persist to QSettings
+        import json as _json
+
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings()
+        settings.setValue(
+            "redaction/fill_color",
+            _json.dumps(list(self._redaction_fill_color)),
+        )
+        settings.setValue(
+            "redaction/replacement_text",
+            self._redaction_replacement_text or "",
+        )
+        settings.setValue("redaction/images", self._redaction_images)
+        settings.setValue("redaction/graphics", self._redaction_graphics)
+        settings.setValue("redaction/text", self._redaction_text)
+        self._propagate_redaction_options()
+        self.statusBar().showMessage("Redaction options saved", 3000)
+
+    def _propagate_redaction_options(self) -> None:
+        """PR 12.3: push session redaction defaults to every open tab."""
+        for i in range(self._tab_widget.count()):
+            tab = self._tab_widget.widget(i)
+            if hasattr(tab, "set_redaction_options"):
+                tab.set_redaction_options(
+                    self._redaction_fill_color,
+                    self._redaction_replacement_text,
+                )
 
     def _on_about(self) -> None:
         """Help -> About slot: show the modal About dialog."""

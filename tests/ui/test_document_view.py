@@ -429,7 +429,7 @@ class TestRedactSelectionSlot:
         calls: list = []
 
         class _SpyService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def redact_words(self, page_index, words):
@@ -464,7 +464,7 @@ class TestRedactSelectionSlot:
         import pdfprism.services.redaction as red_mod
 
         class _StubService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def redact_words(self, page_index, words):
