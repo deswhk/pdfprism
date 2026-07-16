@@ -2016,3 +2016,311 @@ class TestSecurityPasswordPanelRebind:
             assert len(rebinds.get(panel, [])) == 2
             assert rebinds[panel][0] is None
             assert rebinds[panel][1] is tab._adapter
+
+
+# ---- PR 11: File > Properties... integration ----------------------------
+
+
+class TestPropertiesAction:
+    """The Properties action is defined, enable-state-tracked, and menu-placed."""
+
+    def test_action_exists(self, main_window: MainWindow) -> None:
+        assert hasattr(main_window, "act_properties")
+
+    def test_action_disabled_empty_state(self, main_window: MainWindow) -> None:
+        """Positive: no tabs open -> action disabled."""
+        assert main_window._tab_widget.count() == 0
+        assert main_window.act_properties.isEnabled() is False
+
+    def test_action_enabled_with_tab(self, main_window: MainWindow, sample_pdf_path: Path) -> None:
+        """Positive: opening a document enables the action."""
+        main_window._open_path(sample_pdf_path)
+        assert main_window.act_properties.isEnabled() is True
+
+    def test_action_present_in_file_menu(self, main_window: MainWindow) -> None:
+        """Positive: File menu has a Properties entry pointing at act_properties."""
+        # Walk File menu actions and confirm act_properties is among them.
+        menubar = main_window.menuBar()
+        file_menu = None
+        for act in menubar.actions():
+            if act.text().replace("&", "") == "File":
+                file_menu = act.menu()
+                break
+        assert file_menu is not None
+        actions = file_menu.actions()
+        assert main_window.act_properties in actions
+
+
+class TestPropertiesSlotOK:
+    """Slot behavior when the dialog is accepted."""
+
+    def test_accepted_dialog_calls_set_metadata(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: OK -> PropertiesService.set_metadata called with dialog updates."""
+        main_window._open_path(sample_pdf_path)
+
+        # Stub PropertiesDialog to auto-accept + expose fake updates
+        from pdfprism.ui import main_window as mw_mod
+
+        class _StubDialog:
+            def __init__(self, current, parent):
+                self._current = current
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            def get_updates(self):
+                return {"title": "New Title", "author": "New Author"}
+
+            @property
+            def delete_xmp_requested(self):
+                return False
+
+        monkeypatch.setattr(mw_mod, "PropertiesDialog", _StubDialog)
+
+        # Spy on PropertiesService
+        set_metadata_calls: list = []
+
+        class _SpyService:
+            def __init__(self, adapter):
+                self._adapter = adapter
+
+            def set_metadata(self, updates):
+                set_metadata_calls.append(updates)
+
+            def sanitize_metadata(self, delete_xmp=True):
+                pass
+
+        monkeypatch.setattr(mw_mod, "PropertiesService", _SpyService)
+
+        # Also stub adapter.save so we don't touch disk during test
+        tab = main_window._active_tab
+        monkeypatch.setattr(tab._adapter, "save", lambda *a, **kw: None)
+
+        main_window._on_file_properties()
+
+        assert len(set_metadata_calls) == 1
+        assert set_metadata_calls[0]["title"] == "New Title"
+        assert set_metadata_calls[0]["author"] == "New Author"
+
+    def test_cancel_does_not_call_service(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: Cancel -> no service call."""
+        main_window._open_path(sample_pdf_path)
+
+        from pdfprism.ui import main_window as mw_mod
+
+        class _CancelDialog:
+            def __init__(self, current, parent):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Rejected
+
+            def get_updates(self):
+                return {}
+
+            @property
+            def delete_xmp_requested(self):
+                return False
+
+        monkeypatch.setattr(mw_mod, "PropertiesDialog", _CancelDialog)
+
+        set_metadata_calls: list = []
+
+        class _SpyService:
+            def __init__(self, adapter):
+                pass
+
+            def set_metadata(self, updates):
+                set_metadata_calls.append(updates)
+
+        monkeypatch.setattr(mw_mod, "PropertiesService", _SpyService)
+
+        main_window._on_file_properties()
+
+        assert set_metadata_calls == []
+
+
+class TestPropertiesSlotXmp:
+    """XMP deletion flag routing."""
+
+    def _install_stub_dialog(self, monkeypatch, delete_xmp: bool) -> None:
+        from pdfprism.ui import main_window as mw_mod
+
+        class _StubDialog:
+            def __init__(self, current, parent):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            def get_updates(self):
+                return {"title": "T"}
+
+            @property
+            def delete_xmp_requested(self):
+                return delete_xmp
+
+        monkeypatch.setattr(mw_mod, "PropertiesDialog", _StubDialog)
+
+    def test_delete_xmp_true_calls_adapter_method(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: XMP checkbox checked -> adapter.delete_xml_metadata called."""
+        main_window._open_path(sample_pdf_path)
+        self._install_stub_dialog(monkeypatch, delete_xmp=True)
+
+        tab = main_window._active_tab
+        xmp_calls: list = []
+        monkeypatch.setattr(tab._adapter, "delete_xml_metadata", lambda: xmp_calls.append(True))
+        monkeypatch.setattr(tab._adapter, "save", lambda *a, **kw: None)
+
+        main_window._on_file_properties()
+        assert xmp_calls == [True]
+
+    def test_delete_xmp_false_skips_call(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: XMP checkbox unchecked -> adapter.delete_xml_metadata NOT called."""
+        main_window._open_path(sample_pdf_path)
+        self._install_stub_dialog(monkeypatch, delete_xmp=False)
+
+        tab = main_window._active_tab
+        xmp_calls: list = []
+        monkeypatch.setattr(tab._adapter, "delete_xml_metadata", lambda: xmp_calls.append(True))
+        monkeypatch.setattr(tab._adapter, "save", lambda *a, **kw: None)
+
+        main_window._on_file_properties()
+        assert xmp_calls == []
+
+
+class TestPropertiesSlotErrorHandling:
+    """Error paths -- critical dialogs on failure."""
+
+    def test_get_metadata_error_shows_critical(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: adapter.get_metadata raises -> critical dialog."""
+        from pdfprism.core.exceptions import PdfPrismError
+
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+
+        def _raise():
+            raise PdfPrismError("simulated failure")
+
+        monkeypatch.setattr(tab._adapter, "get_metadata", _raise)
+
+        # Capture QMessageBox.critical calls
+        from PySide6.QtWidgets import QMessageBox
+
+        crit_calls: list = []
+        monkeypatch.setattr(QMessageBox, "critical", lambda *a, **kw: crit_calls.append(a))
+
+        main_window._on_file_properties()
+        assert len(crit_calls) == 1
+
+    def test_save_error_shows_critical(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: save() raises -> critical dialog after OK."""
+        from pdfprism.core.exceptions import DocumentSaveError
+
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+
+        from pdfprism.ui import main_window as mw_mod
+
+        class _StubDialog:
+            def __init__(self, current, parent):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            def get_updates(self):
+                return {"title": "T"}
+
+            @property
+            def delete_xmp_requested(self):
+                return False
+
+        monkeypatch.setattr(mw_mod, "PropertiesDialog", _StubDialog)
+
+        class _NoopService:
+            def __init__(self, adapter):
+                pass
+
+            def set_metadata(self, updates):
+                pass
+
+        monkeypatch.setattr(mw_mod, "PropertiesService", _NoopService)
+
+        def _raise_save(*a, **kw):
+            raise DocumentSaveError("simulated save failure")
+
+        monkeypatch.setattr(tab._adapter, "save", _raise_save)
+
+        from PySide6.QtWidgets import QMessageBox
+
+        crit_calls: list = []
+        monkeypatch.setattr(QMessageBox, "critical", lambda *a, **kw: crit_calls.append(a))
+
+        main_window._on_file_properties()
+        assert len(crit_calls) == 1
+
+
+class TestPropertiesSlotNoActiveTab:
+    """Guard: no active tab -> noop."""
+
+    def test_no_active_tab_is_noop(
+        self,
+        main_window: MainWindow,
+        monkeypatch,
+    ) -> None:
+        """Positive: no active tab -> slot returns without dialog."""
+        # No open document
+        assert main_window._active_tab is None
+
+        # If the slot tried to open a dialog we would notice via monkeypatched PropertiesDialog
+        from pdfprism.ui import main_window as mw_mod
+
+        opened: list = []
+
+        class _WatchedDialog:
+            def __init__(self, current, parent):
+                opened.append(True)
+
+        monkeypatch.setattr(mw_mod, "PropertiesDialog", _WatchedDialog)
+
+        main_window._on_file_properties()
+        assert opened == []

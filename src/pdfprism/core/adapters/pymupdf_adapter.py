@@ -102,6 +102,65 @@ class PyMuPDFAdapter:
             needs_password=self._is_encrypted_at_open,
         )
 
+    # ---- PR 11: metadata + permissions --------------------------------
+
+    _METADATA_FIELDS = (
+        "title",
+        "author",
+        "subject",
+        "keywords",
+        "creator",
+        "producer",
+    )
+
+    def get_metadata(self) -> dict[str, str | None]:
+        """Return the six standard PDF Info dict fields.
+
+        Keys: title, author, subject, keywords, creator, producer.
+        Empty strings from PyMuPDF are normalised to ``None`` so
+        callers see a consistent 'missing' representation.
+        """
+        self._require_open()
+        assert self._doc is not None
+        meta = self._doc.metadata or {}
+        return {field: (meta.get(field) or None) for field in self._METADATA_FIELDS}
+
+    def set_metadata(self, updates: dict[str, str | None]) -> None:
+        """Update selected Info dict fields.
+
+        Only keys present in ``updates`` are changed; others are
+        preserved. Passing ``None`` for a value clears that field.
+        Unknown keys are ignored (defensive against future PDF spec
+        additions). Marks the document dirty.
+        """
+        self._require_open()
+        assert self._doc is not None
+        current = dict(self._doc.metadata or {})
+        for key, value in updates.items():
+            if key not in self._METADATA_FIELDS:
+                continue
+            current[key] = value if value is not None else ""
+        self._doc.set_metadata(current)
+        self._is_dirty = True
+
+    def delete_xml_metadata(self) -> None:
+        """Remove the XMP metadata stream from the document.
+
+        XMP is the PDF 2.0 metadata channel. Info-dict clearing
+        alone leaves XMP intact -- provenance/authorship info can
+        survive a metadata sanitize if this isn't also called.
+        No-op if the doc has no XMP stream. Marks the document
+        dirty.
+        """
+        self._require_open()
+        assert self._doc is not None
+        try:
+            self._doc.del_xml_metadata()
+        except Exception:
+            # PyMuPDF raises on missing XMP in some versions; treat as no-op.
+            pass
+        self._is_dirty = True
+
     def get_page_info(self, index: int) -> PageInfo:
         self._require_open()
         assert self._doc is not None
