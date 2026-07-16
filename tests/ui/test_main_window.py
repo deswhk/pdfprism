@@ -2380,13 +2380,13 @@ class TestRedactionApplySlot:
         save_calls: list = []
 
         class _SpyService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def list_redactions(self):
                 return pending
 
-            def apply(self):
+            def apply(self, **kwargs):
                 apply_calls.append(True)
                 return 1
 
@@ -2421,13 +2421,13 @@ class TestRedactionApplySlot:
         apply_calls: list = []
 
         class _SpyService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def list_redactions(self):
                 return pending
 
-            def apply(self):
+            def apply(self, **kwargs):
                 apply_calls.append(True)
                 return 1
 
@@ -2457,13 +2457,13 @@ class TestRedactionApplySlot:
         apply_calls: list = []
 
         class _EmptyService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def list_redactions(self):
                 return []
 
-            def apply(self):
+            def apply(self, **kwargs):
                 apply_calls.append(True)
                 return 0
 
@@ -2493,13 +2493,13 @@ class TestRedactionApplySlot:
         pending = [Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0))]
 
         class _RaisingService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def list_redactions(self):
                 return pending
 
-            def apply(self):
+            def apply(self, **kwargs):
                 raise PdfPrismError("boom")
 
         monkeypatch.setattr(mw_mod, "RedactionService", _RaisingService)
@@ -2558,7 +2558,7 @@ class TestRedactionClearSlot:
         ]
 
         class _SpyService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def list_redactions(self):
@@ -2589,7 +2589,7 @@ class TestRedactionClearSlot:
         adapter = tab._adapter
 
         class _EmptyService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def list_redactions(self):
@@ -2685,7 +2685,7 @@ class TestSearchAndRedactSlot:
         calls: list = []
 
         class _SpyService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def redact_hits(self, hits):
@@ -2726,7 +2726,7 @@ class TestSearchAndRedactSlot:
         calls: list = []
 
         class _SpyService:
-            def __init__(self, a):
+            def __init__(self, a, **kwargs):
                 pass
 
             def redact_hits(self, hits):
@@ -2737,3 +2737,87 @@ class TestSearchAndRedactSlot:
 
         main_window._on_redaction_search()
         assert calls == []
+
+
+# ---- PR 12.3: Redaction Options -----------------------------------------
+
+
+class TestRedactionOptionsAction:
+    def test_action_exists(self, main_window: MainWindow) -> None:
+        assert hasattr(main_window, "act_redaction_options")
+
+    def test_action_always_enabled(self, main_window: MainWindow) -> None:
+        """Positive: options are session-config; enabled without a tab."""
+        assert main_window.act_redaction_options.isEnabled() is True
+
+    def test_initial_defaults(self, main_window: MainWindow) -> None:
+        """Positive: fresh MainWindow has sensible defaults for session values."""
+        assert main_window._redaction_fill_color == (0, 0, 0)
+        assert main_window._redaction_replacement_text is None
+        assert main_window._redaction_images == 2
+        assert main_window._redaction_graphics == 1
+        assert main_window._redaction_text == 0
+
+
+class TestRedactionOptionsSlot:
+    def test_ok_updates_in_memory_state(self, main_window: MainWindow, monkeypatch) -> None:
+        """Positive: OK dialog updates MainWindow session attrs."""
+        from pdfprism.ui import main_window as mw_mod
+
+        class _StubDialog:
+            def __init__(self, **kwargs):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            @property
+            def fill_color(self):
+                return (200, 100, 50)
+
+            @property
+            def replacement_text(self):
+                return "[X]"
+
+            @property
+            def images(self):
+                return 1
+
+            @property
+            def graphics(self):
+                return 0
+
+            @property
+            def text_mode(self):
+                return 1
+
+        monkeypatch.setattr(mw_mod, "RedactionOptionsDialog", _StubDialog)
+
+        main_window._on_redaction_options()
+        assert main_window._redaction_fill_color == (200, 100, 50)
+        assert main_window._redaction_replacement_text == "[X]"
+        assert main_window._redaction_images == 1
+        assert main_window._redaction_graphics == 0
+        assert main_window._redaction_text == 1
+
+    def test_cancel_does_not_change_state(self, main_window: MainWindow, monkeypatch) -> None:
+        """Positive: Cancel leaves session attrs unchanged."""
+        from pdfprism.ui import main_window as mw_mod
+
+        original_color = main_window._redaction_fill_color
+
+        class _CancelDialog:
+            def __init__(self, **kwargs):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(mw_mod, "RedactionOptionsDialog", _CancelDialog)
+
+        main_window._on_redaction_options()
+        assert main_window._redaction_fill_color == original_color

@@ -1735,3 +1735,43 @@ class TestAddRedactionsForHits:
                 adapter.add_redactions_for_hits(hits)
         finally:
             adapter.close()
+
+
+class TestApplyRedactionsKwargs:
+    """PR 12.3: apply_redactions gains images/graphics/text kwargs."""
+
+    def test_default_kwargs_backwards_compatible(self, mutable_pdf_path: Path) -> None:
+        """Positive: default kwargs match PyMuPDF defaults; existing behavior preserved."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 50.0, 30.0)))
+            # Explicit defaults match old hard-coded values.
+            count = adapter.apply_redactions(images=2, graphics=1, text=0)
+            assert count == 1
+        finally:
+            adapter.close()
+
+
+class TestAddRedactionsForWordsKwargs:
+    """PR 12.3: add_redactions_for_words respects fill_color kwarg."""
+
+    def test_custom_fill_color(self, mutable_pdf_path: Path) -> None:
+        """Positive: passing fill_color reads back through list_redactions."""
+        from pdfprism.core.types import Word
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            words = [Word(text="X", x0=10.0, y0=10.0, x1=50.0, y1=25.0)]
+            adapter.add_redactions_for_words(page_index=0, words=words, fill_color=(255, 0, 0))
+            pending = adapter.list_redactions()
+            assert len(pending) == 1
+            # PyMuPDF stores color as 0-1 floats; we read back as 0-255 ints
+            # with round-trip precision loss.
+            r, g, b = pending[0].fill_color
+            assert abs(r - 255) <= 1
+            assert abs(g - 0) <= 1
+            assert abs(b - 0) <= 1
+        finally:
+            adapter.close()

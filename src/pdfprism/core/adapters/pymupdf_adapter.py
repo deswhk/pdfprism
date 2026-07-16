@@ -195,7 +195,14 @@ class PyMuPDFAdapter:
         page.add_redact_annot(rect, **kwargs)
         self._is_dirty = True
 
-    def add_redactions_for_words(self, page_index: int, words: list["Word"]) -> int:
+    def add_redactions_for_words(
+        self,
+        page_index: int,
+        words: list["Word"],
+        *,
+        fill_color: tuple[int, int, int] = (0, 0, 0),
+        replacement_text: str | None = None,
+    ) -> int:
         """PR 12.1: create one redaction annotation per Word.
 
         Used by the text-selection redaction path -- user selects text
@@ -226,15 +233,21 @@ class PyMuPDFAdapter:
         page = self._doc[page_index]
         for word in words:
             rect = pymupdf.Rect(word.x0, word.y0, word.x1, word.y1)
-            page.add_redact_annot(
-                rect,
-                fill=(0.0, 0.0, 0.0),  # black, matching session defaults
-                cross_out=True,
-            )
+            fill = tuple(c / 255.0 for c in fill_color)
+            kwargs: dict = {"fill": fill, "cross_out": True}
+            if replacement_text is not None:
+                kwargs["text"] = replacement_text
+            page.add_redact_annot(rect, **kwargs)
         self._is_dirty = True
         return len(words)
 
-    def add_redactions_for_hits(self, hits: list["SearchHit"]) -> int:
+    def add_redactions_for_hits(
+        self,
+        hits: list["SearchHit"],
+        *,
+        fill_color: tuple[int, int, int] = (0, 0, 0),
+        replacement_text: str | None = None,
+    ) -> int:
         """PR 12.2: create one redaction annotation per SearchHit.
 
         Used by the search-then-redact path -- user types a term into
@@ -269,13 +282,13 @@ class PyMuPDFAdapter:
             by_page.setdefault(hit.page_index, []).append(hit)
         for page_index, page_hits in by_page.items():
             page = self._doc[page_index]
+            fill = tuple(c / 255.0 for c in fill_color)
             for hit in page_hits:
                 rect = pymupdf.Rect(hit.x0, hit.y0, hit.x1, hit.y1)
-                page.add_redact_annot(
-                    rect,
-                    fill=(0.0, 0.0, 0.0),
-                    cross_out=True,
-                )
+                kwargs: dict = {"fill": fill, "cross_out": True}
+                if replacement_text is not None:
+                    kwargs["text"] = replacement_text
+                page.add_redact_annot(rect, **kwargs)
         self._is_dirty = True
         return len(hits)
 
@@ -343,14 +356,27 @@ class PyMuPDFAdapter:
         page.delete_annot(redactions[redaction_index])
         self._is_dirty = True
 
-    def apply_redactions(self) -> int:
+    def apply_redactions(
+        self,
+        *,
+        images: int = 2,
+        graphics: int = 1,
+        text: int = 0,
+    ) -> int:
         """Destructively apply all pending redactions in the document.
 
         Iterates over every page and calls PyMuPDF's ``apply_redactions()``.
-        Uses PyMuPDF defaults: ``images=2`` (fully redact intersecting
-        images), ``graphics=1`` (redact intersecting graphics),
-        ``text=0`` (only redact text within the redaction quad, not
-        text elsewhere on the line).
+        The three keyword arguments are passed through to PyMuPDF and
+        control how content intersecting the redaction rects is handled:
+
+        Args:
+            images: 0=leave alone, 1=blank-fill intersecting images,
+                2=fully redact. PyMuPDF default: 2.
+            graphics: 0=leave alone, 1=redact intersecting graphics.
+                PyMuPDF default: 1.
+            text: 0=only redact text within the redaction quad,
+                1=also remove any text sharing a line with the quad.
+                PyMuPDF default: 0.
 
         Returns the count of applied redactions. Marks the document
         dirty. After this call, ``list_redactions()`` returns an empty
@@ -365,7 +391,7 @@ class PyMuPDFAdapter:
             page_count = sum(1 for _ in page.annots(types=[pymupdf.PDF_ANNOT_REDACT]))
             if page_count == 0:
                 continue
-            page.apply_redactions()
+            page.apply_redactions(images=images, graphics=graphics, text=text)
             count += page_count
         if count > 0:
             self._is_dirty = True

@@ -87,6 +87,12 @@ class DocumentView(QWidget):
         # Payload: (page_index, list of Word objects).
         self._page_view.redact_selection_requested.connect(self._on_redact_selection_requested)
 
+        # PR 12.3: session-level redaction defaults; MainWindow keeps
+        # these in sync via ``set_redaction_options`` after the Options
+        # dialog is accepted or on app startup from QSettings.
+        self._redaction_fill_color: tuple[int, int, int] = (0, 0, 0)
+        self._redaction_replacement_text: str | None = None
+
         # OrganizePagesPanel: panel emits intent, we route through the
         # corresponding mutation methods. Each one already does the
         # adapter mutation + cache clear + panel re-bind + modified-
@@ -457,7 +463,11 @@ class DocumentView(QWidget):
         """Slot: PageView redaction drag -> create annotation."""
         from pdfprism.services.redaction import RedactionService
 
-        RedactionService(self._adapter).add_redaction(page_index=page_index, rect=rect)
+        RedactionService(
+            self._adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        ).add_redaction(page_index=page_index, rect=rect)
         self._refresh_modified()
         # Re-render the page so the new annotation is visible.
         # The page_cache holds a rendered pixmap that does NOT
@@ -471,7 +481,11 @@ class DocumentView(QWidget):
         """PR 12.1: Slot -- selected-text redaction. Per-word rects."""
         from pdfprism.services.redaction import RedactionService
 
-        count = RedactionService(self._adapter).redact_words(page_index, words)
+        count = RedactionService(
+            self._adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        ).redact_words(page_index, words)
         if not count:
             return
         # Clear the text selection now that we've committed it as redactions.
@@ -481,3 +495,12 @@ class DocumentView(QWidget):
         self._page_cache.clear()
         self._page_view.set_adapter(self._adapter)
         self._thumbnail_panel.set_adapter(self._adapter)
+
+    def set_redaction_options(
+        self,
+        fill_color: tuple[int, int, int],
+        replacement_text: str | None,
+    ) -> None:
+        """PR 12.3: apply session-level redaction defaults from MainWindow."""
+        self._redaction_fill_color = fill_color
+        self._redaction_replacement_text = replacement_text

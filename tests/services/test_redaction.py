@@ -115,7 +115,9 @@ class TestRedactWords:
         got = svc.redact_words(page_index=0, words=words)
 
         assert got == 2
-        adapter.add_redactions_for_words.assert_called_once_with(0, words)
+        adapter.add_redactions_for_words.assert_called_once_with(
+            0, words, fill_color=(0, 0, 0), replacement_text=None
+        )
 
     def test_empty_words_returns_zero(self) -> None:
         """Positive: empty list passed through -> 0 from adapter."""
@@ -144,7 +146,9 @@ class TestRedactHits:
         got = svc.redact_hits(hits)
 
         assert got == 2
-        adapter.add_redactions_for_hits.assert_called_once_with(hits)
+        adapter.add_redactions_for_hits.assert_called_once_with(
+            hits, fill_color=(0, 0, 0), replacement_text=None
+        )
 
     def test_empty_hits_returns_zero(self) -> None:
         """Positive: empty list passed through -> 0."""
@@ -152,3 +156,46 @@ class TestRedactHits:
         adapter.add_redactions_for_hits.return_value = 0
         svc = RedactionService(adapter)
         assert svc.redact_hits([]) == 0
+
+
+class TestSessionDefaults:
+    """PR 12.3: RedactionService takes session defaults in __init__."""
+
+    def test_init_defaults_used_in_add_redaction(self) -> None:
+        """Positive: session fill_color/replacement_text flow into constructed Redaction."""
+        from pdfprism.core.types import Redaction
+
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        svc = RedactionService(
+            adapter,
+            fill_color=(200, 100, 50),
+            replacement_text="[CONFIDENTIAL]",
+        )
+        svc.add_redaction(page_index=0, rect=(0.0, 0.0, 10.0, 10.0))
+        adapter.add_redaction.assert_called_once()
+        called = adapter.add_redaction.call_args[0][0]
+        assert isinstance(called, Redaction)
+        assert called.fill_color == (200, 100, 50)
+        assert called.replacement_text == "[CONFIDENTIAL]"
+
+    def test_redact_words_passes_session_defaults(self) -> None:
+        """Positive: redact_words forwards session values as kwargs."""
+        from pdfprism.core.types import Word
+
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.add_redactions_for_words.return_value = 1
+        svc = RedactionService(adapter, fill_color=(200, 100, 50), replacement_text="[REDACTED]")
+        svc.redact_words(0, [Word(text="x", x0=0, y0=0, x1=10, y1=10)])
+        adapter.add_redactions_for_words.assert_called_once()
+        kwargs = adapter.add_redactions_for_words.call_args.kwargs
+        assert kwargs["fill_color"] == (200, 100, 50)
+        assert kwargs["replacement_text"] == "[REDACTED]"
+
+    def test_apply_forwards_kwargs(self) -> None:
+        """Positive: apply forwards images/graphics/text kwargs."""
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.apply_redactions.return_value = 3
+        svc = RedactionService(adapter)
+        result = svc.apply(images=1, graphics=0, text=1)
+        assert result == 3
+        adapter.apply_redactions.assert_called_once_with(images=1, graphics=0, text=1)

@@ -1427,7 +1427,9 @@ save separately after would be a UX trap).
 
 **PR 12.2: search-then-redact.** PR 12.2 layers a ``Redaction → Search and Redact...`` menu action on top of the existing full-document search. The dialog runs ``SearchService.find_all`` against the current adapter, presents matches in a checkbox list (all checked by default), lets the user tick / untick individual matches or Select All / Select None, and commits the checked hits as pending redactions. Case-sensitive and whole-word matching are exposed as toggles; regex is deferred. Adapter gains ``add_redactions_for_hits(hits)`` (per-page batch); service gains ``redact_hits(hits)``. The Redaction menu now reads: Apply Redactions... | Clear All Pending | (sep) | Search and Redact...
 
-**Deferred (PR 12.3 / M5).** PR 12 ships the
+**PR 12.3: redaction options.** PR 12.3 adds session-level customization of redaction defaults via a new ``Redaction → Options...`` menu. The dialog exposes three controls: (a) fill color (RGB, default black; picker uses QColorDialog), (b) replacement text (optional overlay text drawn in the redacted area after apply -- e.g. "[REDACTED]"), and (c) apply behavior mapping to PyMuPDF's ``apply_redactions(images, graphics, text)`` kwargs. Session defaults are persisted via ``QSettings`` (consistent with tool mode persistence from Milestone 3) so they survive app restart. MainWindow propagates session values to every open ``DocumentView`` via ``set_redaction_options`` on tab open and after the Options dialog is accepted; DocumentView constructs ``RedactionService`` with the values when routing drag / text-select / search redactions.
+
+**Deferred (M5).** PR 12 ships the
 foundation: rectangle-drag drawing on visible pages. Text-selection
 redaction (right-click selected text → Redact) is PR 12.1;
 search-then-redact ("find every occurrence of 'John Smith' →
@@ -1527,7 +1529,7 @@ work.
 - PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
 - PR 10.5: Set / change / remove passwords on save; CryptDialog (**shipped**).
 - PR 11: Metadata sanitization (**shipped**). PR 11.5 (deferred): permissions dialog with dual passwords.
-- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact, **shipped**). PR 12.2 (search-then-redact, **shipped**). PR 12.3 (redaction options dialog) deferred.
+- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact, **shipped**). PR 12.2 (search-then-redact, **shipped**). PR 12.3 (redaction options, **shipped**).
 - PR 13: OCR via Tesseract.
 
 
