@@ -32,6 +32,7 @@ from pdfprism.core.types import CrossDocHit
 from pdfprism.services.extract import ExtractService
 from pdfprism.services.pages import PageService
 from pdfprism.services.pages import merge as merge_documents
+from pdfprism.services.properties import PropertiesService
 from pdfprism.services.search import SearchScope, SearchService
 from pdfprism.ui.dialogs.about import AboutDialog
 from pdfprism.ui.dialogs.crop import CropDialog
@@ -42,6 +43,7 @@ from pdfprism.ui.dialogs.goto_page import GotoPageDialog
 from pdfprism.ui.dialogs.insert_pages import InsertPagesDialog
 from pdfprism.ui.dialogs.merge import MergeDialog
 from pdfprism.ui.dialogs.password import PasswordDialog
+from pdfprism.ui.dialogs.properties import PropertiesDialog
 from pdfprism.ui.dialogs.split import SplitDialog
 from pdfprism.ui.theme import DARK_QSS
 from pdfprism.ui.widgets.document_view import DocumentView
@@ -354,6 +356,12 @@ class MainWindow(QMainWindow):
             "Set, change, or remove the password on this document"
         )
 
+        # PR 11: metadata view / edit / sanitize
+        self.act_properties = QAction("P&roperties...", self)
+        self.act_properties.triggered.connect(self._on_file_properties)
+        self.act_properties.setEnabled(False)
+        self.act_properties.setToolTip("View, edit, or sanitize document metadata")
+
         self.act_insert_pages = QAction("&Insert Pages from File...", self)
         self.act_insert_pages.triggered.connect(self._on_insert_pages)
         self.act_insert_pages.setEnabled(False)
@@ -477,6 +485,7 @@ class MainWindow(QMainWindow):
         pages_menu.addAction(self.act_merge)
         security_menu = file_menu.addMenu("Se&curity")
         security_menu.addAction(self.act_security_password)
+        file_menu.addAction(self.act_properties)
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
 
@@ -1344,6 +1353,33 @@ class MainWindow(QMainWindow):
 
         self._refresh_save_actions()
 
+    def _on_file_properties(self) -> None:
+        """Open PropertiesDialog for the active tab; apply on OK."""
+        tab = self._active_tab
+        if tab is None:
+            return
+        adapter = tab._adapter
+        try:
+            current = adapter.get_metadata()
+        except PdfPrismError as exc:
+            QMessageBox.critical(self, "Cannot load metadata", str(exc))
+            return
+        dlg = PropertiesDialog(current, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        updates = dlg.get_updates()
+        delete_xmp = dlg.delete_xmp_requested
+        service = PropertiesService(adapter)
+        try:
+            service.set_metadata(updates)
+            if delete_xmp:
+                adapter.delete_xml_metadata()
+            adapter.save()
+        except PdfPrismError as exc:
+            QMessageBox.critical(self, "Failed to update properties", str(exc))
+            return
+        tab._refresh_modified()
+
     def _on_about(self) -> None:
         """Help -> About slot: show the modal About dialog."""
         AboutDialog(self).exec()
@@ -1560,6 +1596,7 @@ class MainWindow(QMainWindow):
         self.act_extract_selection.setEnabled(has_selection)
         # PR 10.5: security action -- enables with any open tab.
         self.act_security_password.setEnabled(has_tab)
+        self.act_properties.setEnabled(has_tab)
         # Merge requires at least 2 open tabs.
         self.act_merge.setEnabled(self._tab_widget.count() >= 2)
 

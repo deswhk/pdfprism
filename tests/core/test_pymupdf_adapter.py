@@ -1175,3 +1175,222 @@ class TestNeedsPassDoesNotDeAuthenticate:
             assert adapter2._is_encrypted_at_open is False
         finally:
             adapter2.close()
+
+
+# ---- PR 11: metadata read/write ----------------------------------------
+
+
+class TestGetMetadata:
+    """PyMuPDFAdapter.get_metadata reads the six Info dict fields."""
+
+    def test_reads_standard_fields(self, mutable_pdf_path: Path) -> None:
+        """Positive: doc with metadata -> dict has all six keys."""
+        # First set some known metadata via PyMuPDF directly so we can
+        # read it back through the adapter.
+        import pymupdf
+
+        raw = pymupdf.open(str(mutable_pdf_path))
+        try:
+            raw.set_metadata(
+                {
+                    "title": "Test Doc",
+                    "author": "Test Author",
+                    "subject": "Testing",
+                    "keywords": "unit, test",
+                    "creator": "pytest",
+                    "producer": "PyMuPDF",
+                }
+            )
+            raw.save(str(mutable_pdf_path), incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+        finally:
+            raw.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            meta = adapter.get_metadata()
+            assert meta["title"] == "Test Doc"
+            assert meta["author"] == "Test Author"
+            assert meta["subject"] == "Testing"
+            assert meta["keywords"] == "unit, test"
+        finally:
+            adapter.close()
+
+    def test_empty_metadata_normalized_to_none(self, mutable_pdf_path: Path) -> None:
+        """Positive: PyMuPDF empty strings surface as None."""
+        import pymupdf
+
+        # Wipe every Info field on the fixture so we know we're testing
+        # the None-normalization path, not a fixture-authoring artefact.
+        raw = pymupdf.open(str(mutable_pdf_path))
+        try:
+            raw.set_metadata(
+                {
+                    k: ""
+                    for k in (
+                        "title",
+                        "author",
+                        "subject",
+                        "keywords",
+                        "creator",
+                        "producer",
+                    )
+                }
+            )
+            raw.save(str(mutable_pdf_path), incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+        finally:
+            raw.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            meta = adapter.get_metadata()
+            assert meta["author"] is None
+            assert meta["title"] is None
+        finally:
+            adapter.close()
+
+    def test_returns_all_six_keys(self, mutable_pdf_path: Path) -> None:
+        """Positive: dict always has the six standard keys, even if None."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            meta = adapter.get_metadata()
+            expected_keys = {"title", "author", "subject", "keywords", "creator", "producer"}
+            assert set(meta.keys()) == expected_keys
+        finally:
+            adapter.close()
+
+
+class TestSetMetadata:
+    """PyMuPDFAdapter.set_metadata mutates Info dict fields."""
+
+    def test_single_field_update_preserves_others(self, mutable_pdf_path: Path) -> None:
+        """Positive: updating title alone leaves other fields alone."""
+        import pymupdf
+
+        raw = pymupdf.open(str(mutable_pdf_path))
+        try:
+            raw.set_metadata({"author": "Original Author"})
+            raw.save(str(mutable_pdf_path), incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+        finally:
+            raw.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.set_metadata({"title": "New Title"})
+            adapter.save()
+        finally:
+            adapter.close()
+
+        verify = PyMuPDFAdapter()
+        verify.open(mutable_pdf_path)
+        try:
+            meta = verify.get_metadata()
+            assert meta["title"] == "New Title"
+            assert meta["author"] == "Original Author"
+        finally:
+            verify.close()
+
+    def test_multiple_fields_at_once(self, mutable_pdf_path: Path) -> None:
+        """Positive: all fields in the dict get applied."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.set_metadata(
+                {
+                    "title": "Multi Title",
+                    "author": "Multi Author",
+                    "subject": "Multi Subject",
+                }
+            )
+            adapter.save()
+        finally:
+            adapter.close()
+
+        verify = PyMuPDFAdapter()
+        verify.open(mutable_pdf_path)
+        try:
+            meta = verify.get_metadata()
+            assert meta["title"] == "Multi Title"
+            assert meta["author"] == "Multi Author"
+            assert meta["subject"] == "Multi Subject"
+        finally:
+            verify.close()
+
+    def test_none_value_clears_field(self, mutable_pdf_path: Path) -> None:
+        """Positive: passing None for a field wipes it."""
+        import pymupdf
+
+        raw = pymupdf.open(str(mutable_pdf_path))
+        try:
+            raw.set_metadata({"title": "To Be Cleared"})
+            raw.save(str(mutable_pdf_path), incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+        finally:
+            raw.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.set_metadata({"title": None})
+            adapter.save()
+        finally:
+            adapter.close()
+
+        verify = PyMuPDFAdapter()
+        verify.open(mutable_pdf_path)
+        try:
+            assert verify.get_metadata()["title"] is None
+        finally:
+            verify.close()
+
+    def test_unknown_key_ignored(self, mutable_pdf_path: Path) -> None:
+        """Negative: unknown key doesn't raise; also doesn't sneak into metadata."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.set_metadata({"title": "Real", "badkey": "junk"})
+            # No exception. The bad key should not appear in a subsequent read.
+            meta = adapter.get_metadata()
+            assert meta["title"] == "Real"
+            assert "badkey" not in meta
+        finally:
+            adapter.close()
+
+    def test_marks_dirty(self, mutable_pdf_path: Path) -> None:
+        """Positive: set_metadata sets the dirty flag."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            assert adapter.is_dirty is False
+            adapter.set_metadata({"title": "Making Dirty"})
+            assert adapter.is_dirty is True
+        finally:
+            adapter.close()
+
+
+class TestDeleteXmlMetadata:
+    """PyMuPDFAdapter.delete_xml_metadata removes the XMP stream."""
+
+    def test_call_does_not_raise(self, mutable_pdf_path: Path) -> None:
+        """Positive: works whether or not XMP is present."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.delete_xml_metadata()  # sample.pdf has no XMP; must not raise
+        finally:
+            adapter.close()
+
+    def test_marks_dirty(self, mutable_pdf_path: Path) -> None:
+        """Positive: sets dirty flag."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.delete_xml_metadata()
+            assert adapter.is_dirty is True
+        finally:
+            adapter.close()
+
+
+# ---- PR 11: permissions read/write ----------------------------------

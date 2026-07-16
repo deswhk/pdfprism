@@ -1262,6 +1262,94 @@ The adapter reads its stored ``_current_password`` (captured at
 encrypted doc with no explicit spec, preserving the "no accidental
 decryption" invariant.
 
+### Metadata Sanitization (PR 11)
+
+PR 11 exposes the read + write side of PDF **metadata** through a
+Properties dialog. Users can view and edit the six standard Info dict
+fields (title, author, subject, keywords, creator, producer), and can
+one-click sanitize all of them plus optionally delete the XMP metadata
+stream. This is the security-useful half of what was originally scoped
+as PR 11 -- see "Deferred: permissions" below for the story of the
+other half.
+
+**Adapter contract.** ``PyMuPDFAdapter`` gains three methods:
+
+- ``get_metadata() -> dict[str, str | None]``: returns the six standard
+  fields. Empty strings from PyMuPDF are normalized to ``None`` so
+  consumers see a consistent 'missing' representation.
+- ``set_metadata(updates: dict[str, str | None])``: merges the updates
+  into the current Info dict. ``None`` values clear a field. Unknown
+  keys are silently ignored (defensive against future PDF-spec additions).
+  Marks the document dirty; changes persist on the next ``save()``.
+- ``delete_xml_metadata()``: removes the XMP metadata stream. XMP is
+  the PDF 2.0 metadata channel, structurally separate from the Info
+  dict; it can carry redundant author/creator info that survives an
+  Info-dict-only sanitize. Idempotent (no-op if no XMP present).
+
+**PropertiesService.** ``services/properties.py`` provides two named
+intents on top of the adapter:
+
+- ``sanitize_metadata(delete_xmp=True)``: clears every Info-dict field
+  then optionally deletes XMP. Runs in two phases; the Info-dict clear
+  is unconditional (happens first) and the XMP delete is guarded by
+  the flag (so a caller can sanitize just the Info dict if they have
+  a specific reason to preserve XMP -- rare, but possible).
+- ``set_metadata(updates: dict)``: passthrough with a small
+  normalization -- empty strings become ``None`` at the service
+  boundary, matching the "user backspaced this field to empty means
+  clear it" convention from dialog UX.
+
+**PropertiesDialog.** ``ui/dialogs/properties.py`` is a modal with a
+single Metadata tab (permissions deferred; see below). Six labeled
+``QLineEdit`` editors populate on construction from the current
+metadata. A **Sanitize All Fields** button clears all editors
+immediately for visual feedback but does not commit -- the user can
+still change fields or Cancel. A **Delete embedded XMP metadata
+stream** checkbox controls whether XMP is also removed on OK; it
+defaults to checked so a sanitize is complete by default. The dialog
+is dumb -- it holds initial state + edits and exposes
+``get_updates()`` + ``delete_xmp_requested`` for the caller to apply.
+No service or adapter dependency at construction; MainWindow wires
+them together.
+
+**MainWindow integration.** A new ``File → Properties...`` menu
+entry (top level, next to the Security submenu) opens the dialog for
+the active tab. Enable-state tracks the active tab like the other
+document-level actions. The slot dispatches through
+``PropertiesService`` for the metadata update, calls
+``adapter.delete_xml_metadata()`` directly when the XMP checkbox is
+checked (bypassing the service since we already know the intent),
+then saves. Errors surface via ``QMessageBox.critical``. No panel
+detach/rebind dance is needed here: metadata mutations don't touch
+the page rendering pipeline.
+
+**Deferred: permissions.** The original PR 11 scope included PDF
+permissions (print/copy/edit restrictions) via a second tab in
+PropertiesDialog. Two things led to deferring this:
+
+1. **PyMuPDF's ``permissions=`` save kwarg silently ignores the value
+   when user_pw == owner_pw.** PDF spec: the reader authenticates as
+   owner when either password matches the owner password (which
+   defaults to the user password in our helper), and owner
+   authentication bypasses all permissions. Adobe Acrobat and other
+   spec-honest tools address this by exposing both passwords with
+   distinct labels ("Document Open Password" vs "Permissions
+   Password"). Preview and other consumer tools address it by not
+   offering permissions at all.
+
+2. **Permissions are honor-system, not cryptographic.** Compliant
+   viewers respect the flags; non-compliant ones ignore them, and
+   ``mutool clean`` / ``qpdf`` can strip them in seconds. For a
+   casual-user reader/editor like pdfprism, exposing this without
+   clear UX for the caveats risks giving users a false sense of
+   security.
+
+The right approach if we revisit this is PR 11.5: Adobe-style dual
+password fields with warnings about honor-system enforcement. The
+``Permissions`` dataclass + ``EncryptionSpec.permissions`` field that
+were prototyped in PR 11's early sub-steps were removed for
+cleanliness; the design is captured under Roadmap M4.
+
 ### Milestone 1 — Reader Core
 
 - **PR 1: Foundation.** Scaffold, license, CI, branch protection (via
@@ -1351,9 +1439,12 @@ decryption" invariant.
 
 - PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
 - PR 10.5: Set / change / remove passwords on save; CryptDialog (**shipped**).
-- PR 11: Permissions (owner-password territory) and metadata sanitization.
+- PR 11: Metadata sanitization (**shipped**). PR 11.5 (deferred): permissions dialog with dual passwords.
 - PR 12: Redaction (separate PR because correctness is critical).
 - PR 13: OCR via Tesseract.
+
+
+**PR 11.5 (deferred): Permissions dialog.** After PR 11 dropped permissions from scope (PyMuPDF's ``permissions=`` save kwarg only takes effect when user_pw and owner_pw are distinct -- otherwise the reader authenticates as owner and all restrictions are silently overridden; enforcement is honor-system anyway, not cryptographic), permissions is deferred. If a concrete user requirement emerges, PR 11.5 would add an Adobe-style dual-password dialog with an explicit owner-password field, an explanation of the honor-system caveat, and grouped permission checkboxes. Reference design: Adobe Acrobat's File → Properties → Security tab.
 
 ### Milestone 5 — Advanced
 
