@@ -150,3 +150,32 @@ class EncryptionSpec:
     user_password: str | None
     owner_password: str | None = None
     algorithm: str = "AES-256"
+
+
+@dataclass(frozen=True)
+class Redaction:
+    """A pending or applied redaction mark on a document page (PR 12).
+
+    Represents a rectangular region that will be (pending) or has been
+    (applied) redacted -- content within the rectangle is destroyed
+    when ``apply_redactions()`` is called on the adapter. Redactions
+    are two-phase: they exist as annotations on the doc first (still
+    reversible), and are made destructive by an explicit apply.
+
+    ``rect`` uses PDF-space coordinates (points, y-axis top-to-bottom
+    per PyMuPDF convention). Callers working with view-space
+    (pixels at some zoom) must convert to page-space before
+    constructing a Redaction.
+
+    ``fill_color`` is RGB 0-255 (user-friendly form). The adapter
+    converts to PyMuPDF's 0-1 float triple at the API boundary.
+
+    ``replacement_text`` is optional overlay text drawn in the
+    redacted rectangle after apply (e.g. "[REDACTED]", "[NAME]").
+    None means no text -- solid fill only.
+    """
+
+    page_index: int
+    rect: tuple[float, float, float, float]  # (x0, y0, x1, y1) in PDF points
+    replacement_text: str | None = None
+    fill_color: tuple[int, int, int] = (0, 0, 0)  # RGB 0-255; default black

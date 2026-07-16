@@ -14,7 +14,14 @@ from pdfprism.core.exceptions import (
     PageOutOfRangeError,
     PasswordRequiredError,
 )
-from pdfprism.core.types import DocumentInfo, EncryptionSpec, OutlineItem, PageInfo, SearchHit
+from pdfprism.core.types import (
+    DocumentInfo,
+    EncryptionSpec,
+    OutlineItem,
+    PageInfo,
+    Redaction,
+    SearchHit,
+)
 
 # PNG file signature
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -1394,3 +1401,234 @@ class TestDeleteXmlMetadata:
 
 
 # ---- PR 11: permissions read/write ----------------------------------
+
+# ---- PR 12: adapter redaction tests -------------------------------------
+
+
+class TestAddRedaction:
+    """PyMuPDFAdapter.add_redaction creates a redact annotation."""
+
+    def test_creates_annotation(self, mutable_pdf_path: Path) -> None:
+        """Positive: after add_redaction, list_redactions has one entry."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            r = Redaction(page_index=0, rect=(50.0, 50.0, 200.0, 100.0))
+            adapter.add_redaction(r)
+            pending = adapter.list_redactions()
+            assert len(pending) == 1
+            assert pending[0].page_index == 0
+        finally:
+            adapter.close()
+
+    def test_rect_preserved(self, mutable_pdf_path: Path) -> None:
+        """Positive: the annotation's rect matches what we passed."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            r = Redaction(page_index=0, rect=(72.0, 100.0, 300.0, 130.0))
+            adapter.add_redaction(r)
+            pending = adapter.list_redactions()
+            # Float precision from PDF round-trip -- allow small tolerance
+            got = pending[0].rect
+            for expected, actual in zip((72.0, 100.0, 300.0, 130.0), got, strict=True):
+                assert abs(expected - actual) < 0.5, f"{expected} vs {actual}"
+        finally:
+            adapter.close()
+
+    def test_marks_dirty(self, mutable_pdf_path: Path) -> None:
+        """Positive: add_redaction sets the dirty flag."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            assert adapter.is_dirty is False
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 50.0, 30.0)))
+            assert adapter.is_dirty is True
+        finally:
+            adapter.close()
+
+    def test_page_out_of_range(self, mutable_pdf_path: Path) -> None:
+        """Negative: page_index >= page_count raises PageOutOfRangeError."""
+        from pdfprism.core.exceptions import PageOutOfRangeError
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            with pytest.raises(PageOutOfRangeError):
+                adapter.add_redaction(Redaction(page_index=999, rect=(0.0, 0.0, 10.0, 10.0)))
+        finally:
+            adapter.close()
+
+
+class TestListRedactions:
+    """PyMuPDFAdapter.list_redactions returns pending marks."""
+
+    def test_empty_doc_returns_empty_list(self, mutable_pdf_path: Path) -> None:
+        """Positive: no redactions -> empty list."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            assert adapter.list_redactions() == []
+        finally:
+            adapter.close()
+
+    def test_page_major_order(self, mutable_pdf_path: Path) -> None:
+        """Positive: redactions returned in page-major order.
+
+        Only works if the fixture has at least 2 pages -- if not,
+        skip. sample.pdf is 2-page.
+        """
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            if adapter.page_count < 2:
+                pytest.skip("Fixture has fewer than 2 pages")
+            # Add one to page 1 first, then to page 0. Expect them back
+            # in page-order (0 first, 1 second).
+            adapter.add_redaction(Redaction(page_index=1, rect=(10.0, 10.0, 50.0, 30.0)))
+            adapter.add_redaction(Redaction(page_index=0, rect=(20.0, 20.0, 60.0, 40.0)))
+            pending = adapter.list_redactions()
+            assert len(pending) == 2
+            assert pending[0].page_index == 0
+            assert pending[1].page_index == 1
+        finally:
+            adapter.close()
+
+    def test_read_only_does_not_mark_dirty(self, mutable_pdf_path: Path) -> None:
+        """Positive: list_redactions is a read; it does not mark dirty."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.list_redactions()
+            # Adapter dirty flag stays False (nothing was mutated).
+            assert adapter.is_dirty is False
+        finally:
+            adapter.close()
+
+
+class TestRemoveRedaction:
+    """PyMuPDFAdapter.remove_redaction deletes a specific pending mark."""
+
+    def test_removes_target_only(self, mutable_pdf_path: Path) -> None:
+        """Positive: remove_redaction leaves other marks intact."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 50.0, 30.0)))
+            adapter.add_redaction(Redaction(page_index=0, rect=(100.0, 100.0, 200.0, 150.0)))
+            assert len(adapter.list_redactions()) == 2
+            adapter.remove_redaction(page_index=0, redaction_index=0)
+            remaining = adapter.list_redactions()
+            assert len(remaining) == 1
+            # The remaining one should be the second rect (100, 100, 200, 150).
+            got = remaining[0].rect
+            assert abs(got[0] - 100.0) < 0.5
+        finally:
+            adapter.close()
+
+    def test_page_out_of_range(self, mutable_pdf_path: Path) -> None:
+        """Negative: page_index invalid -> PageOutOfRangeError."""
+        from pdfprism.core.exceptions import PageOutOfRangeError
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            with pytest.raises(PageOutOfRangeError):
+                adapter.remove_redaction(page_index=999, redaction_index=0)
+        finally:
+            adapter.close()
+
+    def test_redaction_index_out_of_range(self, mutable_pdf_path: Path) -> None:
+        """Negative: redaction_index >= count on that page -> IndexError."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            with pytest.raises(IndexError):
+                adapter.remove_redaction(page_index=0, redaction_index=0)
+        finally:
+            adapter.close()
+
+
+class TestApplyRedactions:
+    """PyMuPDFAdapter.apply_redactions destructively commits pending marks."""
+
+    def test_destroys_text_under_mark(self, mutable_pdf_path: Path, tmp_path: Path) -> None:
+        """Positive: text within the redaction rect is gone after apply."""
+        # Fresh fixture with known text
+
+        import pymupdf
+
+        p_test = tmp_path / "apply_test.pdf"
+        # Create a PDF with two lines of text
+        d = pymupdf.open()
+        page = d.new_page(width=612, height=792)
+        page.insert_text((72, 200), "SECRET_TEXT_ABC", fontsize=14)
+        page.insert_text((72, 250), "keep this line", fontsize=12)
+        d.save(str(p_test))
+        d.close()
+
+        # Use text search to get the exact rect of SECRET_TEXT_ABC
+        d = pymupdf.open(str(p_test))
+        matches = d.load_page(0).search_for("SECRET_TEXT_ABC")
+        assert matches, "Setup: SECRET_TEXT_ABC not found in fixture"
+        r = matches[0]
+        d.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(p_test)
+        try:
+            adapter.add_redaction(
+                Redaction(
+                    page_index=0,
+                    rect=(r.x0, r.y0, r.x1, r.y1),
+                )
+            )
+            count = adapter.apply_redactions()
+            assert count == 1
+            adapter.save()
+        finally:
+            adapter.close()
+
+        # Reopen and verify
+        d = pymupdf.open(str(p_test))
+        text = d.load_page(0).get_text()
+        d.close()
+        assert "SECRET_TEXT_ABC" not in text, f"Text should be redacted: {text!r}"
+        assert "keep this line" in text, f"Other text should survive: {text!r}"
+
+    def test_returns_count_applied(self, mutable_pdf_path: Path) -> None:
+        """Positive: apply_redactions returns the number of marks committed."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 50.0, 30.0)))
+            if adapter.page_count > 1:
+                adapter.add_redaction(Redaction(page_index=1, rect=(10.0, 10.0, 50.0, 30.0)))
+                expected = 2
+            else:
+                expected = 1
+            count = adapter.apply_redactions()
+            assert count == expected
+        finally:
+            adapter.close()
+
+    def test_empty_doc_returns_zero(self, mutable_pdf_path: Path) -> None:
+        """Positive: nothing pending -> apply returns 0."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            assert adapter.apply_redactions() == 0
+        finally:
+            adapter.close()
+
+    def test_pending_empty_after_apply(self, mutable_pdf_path: Path) -> None:
+        """Positive: annotations are consumed by apply; list is now empty."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 50.0, 30.0)))
+            assert len(adapter.list_redactions()) == 1
+            adapter.apply_redactions()
+            assert adapter.list_redactions() == []
+        finally:
+            adapter.close()

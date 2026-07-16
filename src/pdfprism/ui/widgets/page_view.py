@@ -15,6 +15,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsPolygonItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QMenu,
@@ -49,6 +50,7 @@ class ToolMode(StrEnum):
 
     HAND = "hand"
     SELECT = "select"
+    REDACTION = "redaction"
 
 
 _RENDER_SCALE = 2.0
@@ -63,6 +65,8 @@ _PAGE_SPACING = 24.0
 _HIGHLIGHT_OTHER = QColor(255, 235, 59, 110)
 _HIGHLIGHT_CURRENT = QColor(255, 152, 0, 160)
 _HIGHLIGHT_SELECTION = QColor(33, 150, 243, 110)
+# PR 12: semi-transparent red overlay for pending redaction drag.
+_REDACTION_PENDING = QColor(220, 30, 30, 140)
 
 
 class PageView(QGraphicsView):
@@ -94,6 +98,9 @@ class PageView(QGraphicsView):
     selection_changed = Signal(str)
     copy_requested = Signal()
     extract_selection_requested = Signal()
+    # PR 12: emitted on redaction drag release with (page_index, rect)
+    # where rect is (x0, y0, x1, y1) in PDF-space points.
+    redaction_requested = Signal(int, tuple)
 
     def __init__(
         self,
@@ -121,6 +128,9 @@ class PageView(QGraphicsView):
         self._selected_words: list[Word] = []
         self._selection_items: list[QGraphicsPolygonItem] = []
         self._selection_anchor: QPointF | None = None
+        # PR 12: pending-redaction drag state
+        self._redaction_anchor: QPointF | None = None
+        self._redaction_temp_item: QGraphicsRectItem | None = None
 
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -424,6 +434,12 @@ class PageView(QGraphicsView):
         if mode == ToolMode.HAND:
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        elif mode == ToolMode.REDACTION:
+            # PR 12: our own drag handler (sub-step 6) draws
+            # redaction rectangles; disable Qt's built-in drag
+            # behaviors so nothing else intercepts the mouse.
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
@@ -446,12 +462,21 @@ class PageView(QGraphicsView):
             self._selection_anchor = self.mapToScene(event.position().toPoint())
             event.accept()
             return
+        if self._tool_mode == ToolMode.REDACTION and event.button() == Qt.MouseButton.LeftButton:
+            self._redaction_anchor = self.mapToScene(event.position().toPoint())
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._tool_mode == ToolMode.SELECT and self._selection_anchor is not None:
             current = self.mapToScene(event.position().toPoint())
             self._update_selection_from_drag(self._selection_anchor, current)
+            event.accept()
+            return
+        if self._tool_mode == ToolMode.REDACTION and self._redaction_anchor is not None:
+            current = self.mapToScene(event.position().toPoint())
+            self._update_redaction_overlay(self._redaction_anchor, current)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -464,6 +489,15 @@ class PageView(QGraphicsView):
         ):
             self._selection_anchor = None
             self.selection_changed.emit(self.selected_text)
+            event.accept()
+            return
+        if (
+            self._tool_mode == ToolMode.REDACTION
+            and self._redaction_anchor is not None
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            current = self.mapToScene(event.position().toPoint())
+            self._commit_redaction_drag(self._redaction_anchor, current)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -507,6 +541,73 @@ class PageView(QGraphicsView):
             item.setZValue(1.0)
             self._scene.addItem(item)
             self._selection_items.append(item)
+
+    def _update_redaction_overlay(self, anchor: QPointF, current: QPointF) -> None:
+        """PR 12: redraw the pending-redaction rectangle during a drag.
+
+        Uses scene coordinates directly (no page-space conversion
+        needed for the visual overlay). Creates the QGraphicsRectItem
+        on first move; updates its rect thereafter. Removed by
+        ``_commit_redaction_drag`` or by cancellation (Escape).
+        """
+        x0 = min(anchor.x(), current.x())
+        y0 = min(anchor.y(), current.y())
+        x1 = max(anchor.x(), current.x())
+        y1 = max(anchor.y(), current.y())
+        w = x1 - x0
+        h = y1 - y0
+        if self._redaction_temp_item is None:
+            item = QGraphicsRectItem(x0, y0, w, h)
+            item.setBrush(QBrush(_REDACTION_PENDING))
+            item.setPen(QPen(Qt.PenStyle.NoPen))
+            item.setZValue(2.0)
+            self._scene.addItem(item)
+            self._redaction_temp_item = item
+        else:
+            self._redaction_temp_item.setRect(x0, y0, w, h)
+
+    def _commit_redaction_drag(self, anchor: QPointF, current: QPointF) -> None:
+        """PR 12: convert scene coords to page-space + emit redaction_requested.
+
+        Only single-page view mode is supported (mirroring the
+        text-select constraint). Drags smaller than 5x5 scene
+        pixels are treated as accidental clicks and ignored.
+        Removes the temporary overlay item.
+        """
+        # Always release the anchor + temp item, even if we bail
+        # out below -- otherwise a bad drag leaves the temp item
+        # visible forever.
+        self._redaction_anchor = None
+        if self._redaction_temp_item is not None:
+            self._scene.removeItem(self._redaction_temp_item)
+            self._redaction_temp_item = None
+
+        if self._view_mode != ViewMode.SINGLE_PAGE:
+            return
+        if self._page_count == 0:
+            return
+        w = abs(anchor.x() - current.x())
+        h = abs(anchor.y() - current.y())
+        if w < 5 or h < 5:
+            return
+        # Convert scene -> page-space (PDF points). Scene is
+        # rendered at _RENDER_SCALE, so divide.
+        x0 = min(anchor.x(), current.x()) / _RENDER_SCALE
+        y0 = min(anchor.y(), current.y()) / _RENDER_SCALE
+        x1 = max(anchor.x(), current.x()) / _RENDER_SCALE
+        y1 = max(anchor.y(), current.y()) / _RENDER_SCALE
+        self.redaction_requested.emit(self._current_page, (x0, y0, x1, y1))
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        # PR 12: Escape cancels a pending redaction drag.
+        if event.key() == Qt.Key.Key_Escape and self._redaction_anchor is not None:
+            self._redaction_anchor = None
+            if self._redaction_temp_item is not None:
+                self._scene.removeItem(self._redaction_temp_item)
+                self._redaction_temp_item = None
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         """Right-click context menu. Always available regardless of

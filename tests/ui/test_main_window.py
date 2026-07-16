@@ -2324,3 +2324,316 @@ class TestPropertiesSlotNoActiveTab:
 
         main_window._on_file_properties()
         assert opened == []
+
+
+# ---- PR 12: Redaction menu integration ---------------------------------
+
+
+class TestRedactionMenuAction:
+    """Redaction menu actions exist, are enable-state-tracked, and menu-placed."""
+
+    def test_apply_action_exists(self, main_window: MainWindow) -> None:
+        assert hasattr(main_window, "act_redaction_apply")
+
+    def test_clear_action_exists(self, main_window: MainWindow) -> None:
+        assert hasattr(main_window, "act_redaction_clear")
+
+    def test_disabled_empty_state(self, main_window: MainWindow) -> None:
+        """Positive: no tabs open -> both actions disabled."""
+        assert main_window._tab_widget.count() == 0
+        assert main_window.act_redaction_apply.isEnabled() is False
+        assert main_window.act_redaction_clear.isEnabled() is False
+
+    def test_enabled_with_tab(self, main_window: MainWindow, sample_pdf_path: Path) -> None:
+        """Positive: opening a document enables both actions."""
+        main_window._open_path(sample_pdf_path)
+        assert main_window.act_redaction_apply.isEnabled() is True
+        assert main_window.act_redaction_clear.isEnabled() is True
+
+    def test_redaction_menu_in_menubar(self, main_window: MainWindow) -> None:
+        """Positive: Redaction menu is present in the menu bar."""
+        menubar = main_window.menuBar()
+        titles = [act.text().replace("&", "") for act in menubar.actions()]
+        assert "Redaction" in titles
+
+
+class TestRedactionApplySlot:
+    """_on_redaction_apply slot behaviour."""
+
+    def test_yes_confirmation_applies_and_saves(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: Yes -> service.apply + save called."""
+        from pdfprism.core.types import Redaction
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+        adapter = tab._adapter
+
+        # Make list_redactions return non-empty via monkeypatch
+        pending = [Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0))]
+        apply_calls: list = []
+        save_calls: list = []
+
+        class _SpyService:
+            def __init__(self, a):
+                pass
+
+            def list_redactions(self):
+                return pending
+
+            def apply(self):
+                apply_calls.append(True)
+                return 1
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
+        monkeypatch.setattr(adapter, "save", lambda *a, **kw: save_calls.append(True))
+
+        # Auto-confirm Yes
+        from PySide6.QtWidgets import QMessageBox
+
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: QMessageBox.StandardButton.Yes,
+        )
+
+        main_window._on_redaction_apply()
+        assert apply_calls == [True]
+        assert save_calls == [True]
+
+    def test_no_confirmation_skips_apply(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: No -> no apply call."""
+        from pdfprism.core.types import Redaction
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        pending = [Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0))]
+        apply_calls: list = []
+
+        class _SpyService:
+            def __init__(self, a):
+                pass
+
+            def list_redactions(self):
+                return pending
+
+            def apply(self):
+                apply_calls.append(True)
+                return 1
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
+
+        from PySide6.QtWidgets import QMessageBox
+
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: QMessageBox.StandardButton.No,
+        )
+
+        main_window._on_redaction_apply()
+        assert apply_calls == []
+
+    def test_empty_pending_shows_info_dialog(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: nothing pending -> info dialog, no service call."""
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        apply_calls: list = []
+
+        class _EmptyService:
+            def __init__(self, a):
+                pass
+
+            def list_redactions(self):
+                return []
+
+            def apply(self):
+                apply_calls.append(True)
+                return 0
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _EmptyService)
+
+        from PySide6.QtWidgets import QMessageBox
+
+        info_calls: list = []
+        monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: info_calls.append(True))
+
+        main_window._on_redaction_apply()
+        assert info_calls == [True]
+        assert apply_calls == []
+
+    def test_apply_error_shows_critical(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: service.apply raises -> critical dialog."""
+        from pdfprism.core.exceptions import PdfPrismError
+        from pdfprism.core.types import Redaction
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        pending = [Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0))]
+
+        class _RaisingService:
+            def __init__(self, a):
+                pass
+
+            def list_redactions(self):
+                return pending
+
+            def apply(self):
+                raise PdfPrismError("boom")
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _RaisingService)
+
+        from PySide6.QtWidgets import QMessageBox
+
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **kw: QMessageBox.StandardButton.Yes,
+        )
+        crit_calls: list = []
+        monkeypatch.setattr(QMessageBox, "critical", lambda *a, **kw: crit_calls.append(True))
+
+        main_window._on_redaction_apply()
+        assert crit_calls == [True]
+
+    def test_no_active_tab_is_noop(self, main_window: MainWindow, monkeypatch) -> None:
+        """Positive: no active tab -> no-op."""
+        assert main_window._active_tab is None
+        from pdfprism.ui import main_window as mw_mod
+
+        constructed: list = []
+
+        class _CountingService:
+            def __init__(self, a):
+                constructed.append(True)
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _CountingService)
+
+        main_window._on_redaction_apply()
+        assert constructed == []
+
+
+class TestRedactionClearSlot:
+    """_on_redaction_clear slot behaviour."""
+
+    def test_clears_all_pending(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: all pending marks removed via adapter.remove_redaction."""
+        from pdfprism.core.types import Redaction
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+        adapter = tab._adapter
+
+        # Two pending on page 0, one on page 1 (if fixture has page 1)
+        pending = [
+            Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0)),
+            Redaction(page_index=0, rect=(120.0, 10.0, 200.0, 30.0)),
+        ]
+
+        class _SpyService:
+            def __init__(self, a):
+                pass
+
+            def list_redactions(self):
+                return pending
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
+
+        remove_calls: list = []
+        monkeypatch.setattr(adapter, "remove_redaction", lambda p, i: remove_calls.append((p, i)))
+
+        main_window._on_redaction_clear()
+        # Two calls to remove_redaction (order: reverse per page)
+        assert len(remove_calls) == 2
+        # Both on page 0
+        assert all(p == 0 for p, i in remove_calls)
+
+    def test_empty_pending_status_message(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: nothing pending -> status message, no adapter call."""
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+        adapter = tab._adapter
+
+        class _EmptyService:
+            def __init__(self, a):
+                pass
+
+            def list_redactions(self):
+                return []
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _EmptyService)
+        remove_calls: list = []
+        monkeypatch.setattr(adapter, "remove_redaction", lambda p, i: remove_calls.append((p, i)))
+
+        main_window._on_redaction_clear()
+        assert remove_calls == []
+
+    def test_no_active_tab_is_noop(self, main_window: MainWindow, monkeypatch) -> None:
+        """Positive: no active tab -> no-op."""
+        assert main_window._active_tab is None
+        from pdfprism.ui import main_window as mw_mod
+
+        constructed: list = []
+
+        class _CountingService:
+            def __init__(self, a):
+                constructed.append(True)
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _CountingService)
+
+        main_window._on_redaction_clear()
+        assert constructed == []
+
+
+# ---- Menu order convention ----------------------------------------------
+
+
+class TestMenuOrder:
+    """Standard menu order: Help is always last."""
+
+    def test_help_is_last(self, main_window: MainWindow) -> None:
+        """Positive: Help sits at the end of the menu bar (universal convention)."""
+        menubar = main_window.menuBar()
+        titles = [a.text().replace("&", "") for a in menubar.actions()]
+        assert titles[-1] == "Help", f"Menu order was {titles}; Help must be last"
+
+    def test_expected_order(self, main_window: MainWindow) -> None:
+        """Positive: full menu order is stable."""
+        menubar = main_window.menuBar()
+        titles = [a.text().replace("&", "") for a in menubar.actions()]
+        expected = ["File", "Edit", "View", "Redaction", "Go", "Help"]
+        assert titles == expected

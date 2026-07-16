@@ -1350,6 +1350,89 @@ password fields with warnings about honor-system enforcement. The
 were prototyped in PR 11's early sub-steps were removed for
 cleanliness; the design is captured under Roadmap M4.
 
+### Redaction (PR 12)
+
+PR 12 delivers destructive PDF redaction: users draw rectangles on
+the page, review them as pending marks, then apply to permanently
+destroy the content underneath. This is the correctness-critical
+half of Milestone 4 -- unlike metadata sanitization (soft, reversible
+until saved) or permissions (honor-system, not enforced), redaction
+actually removes bytes from the PDF.
+
+**Two-phase architecture.** Redaction is deliberately non-atomic:
+
+1. **Mark** (via ToolMode.REDACTION drag): creates a
+   ``PDF_ANNOT_REDACT`` annotation on the target page. Non-destructive.
+   Marks show as red-outlined rectangles with a cross, distinct from
+   the semi-transparent red "pending drag" overlay that only exists
+   during the drag itself.
+2. **Apply** (via ``Redaction → Apply Redactions...``): destructive
+   commit. All pending annotations are consumed; content within each
+   rect is permanently removed. Auto-saves after apply -- a separate
+   save step would be a UX trap (user might close the app thinking
+   the destruction was already committed).
+
+Users can review pending marks by reopening the file (they persist
+as annotations across saves) and either apply or clear.
+**Clear All Pending** exists as a safe escape hatch that removes marks
+without applying.
+
+**Adapter contract.** ``PyMuPDFAdapter`` gains four methods:
+
+- ``add_redaction(redaction: Redaction)``: creates the annotation.
+  Rect is in PDF-space (points). Fill color is 0-255 RGB at the
+  callable boundary, translated to PyMuPDF's 0-1 float triple
+  inside the adapter.
+- ``list_redactions() -> list[Redaction]``: page-major ordered
+  scan of all pending marks. Read-only, doesn't mark dirty.
+- ``remove_redaction(page_index, redaction_index)``: deletes a
+  specific pending mark. Marks dirty.
+- ``apply_redactions() -> int``: iterates every page, calls
+  PyMuPDF's ``apply_redactions()`` per-page. Uses PyMuPDF
+  defaults: images blank-filled, graphics redacted, text outside
+  the rect preserved.
+
+**Redaction value object.** ``Redaction`` in ``core/types.py`` is
+frozen with four fields: ``page_index``, ``rect`` (x0,y0,x1,y1 in
+PDF points), ``replacement_text`` (optional overlay text after
+apply -- e.g. "[REDACTED]"), and ``fill_color`` (RGB 0-255, default
+black). Callers work with view-space during interaction and
+convert to page-space at the service boundary.
+
+**RedactionService.** ``services/redaction.py`` has four intents
+mirroring the adapter: ``add_redaction``, ``list_redactions``,
+``remove_redaction``, ``apply``. Signal shape: PageView emits
+``redaction_requested(page_index, rect)`` on drag release;
+DocumentView's ``_on_redaction_requested`` slot routes through
+the service.
+
+**PageView interaction (single-page mode only).** REDACTION mode
+extends the existing HAND/SELECT tool-mode enum. Cursor changes
+to CrossCursor. Drag mechanics mirror text selection: press
+captures ``_redaction_anchor`` in scene coordinates; move updates
+a ``QGraphicsRectItem`` overlay (semi-transparent red, z-value 2
+so it draws above the selection overlay); release converts scene
+to page-space (dividing by ``_RENDER_SCALE``) and emits the signal.
+Drags under 5x5 scene pixels are treated as accidental clicks and
+ignored. Escape mid-drag cancels cleanly -- the temp overlay
+disappears and the anchor clears without emitting.
+
+**Save semantics.** ``File → Save`` preserves pending marks as
+annotations (non-destructive). ``Redaction → Apply
+Redactions...`` is destructive-then-auto-save (per Q6 in the design
+Q&A: users clicking Apply have committed intent; asking them to
+save separately after would be a UX trap).
+
+**Deferred (PR 12.1 / 12.2 / 12.3 / M5).** PR 12 ships the
+foundation: rectangle-drag drawing on visible pages. Text-selection
+redaction (right-click selected text → Redact) is PR 12.1;
+search-then-redact ("find every occurrence of 'John Smith' →
+click each result to mark") is PR 12.2; a Redaction Options dialog
+exposing PyMuPDF's ``images/graphics/text`` kwargs is PR 12.3;
+per-mark customization (different fill colors or replacement text
+per mark) is deferred to Milestone 5 because it needs UX design
+work.
+
 ### Milestone 1 — Reader Core
 
 - **PR 1: Foundation.** Scaffold, license, CI, branch protection (via
@@ -1440,7 +1523,7 @@ cleanliness; the design is captured under Roadmap M4.
 - PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
 - PR 10.5: Set / change / remove passwords on save; CryptDialog (**shipped**).
 - PR 11: Metadata sanitization (**shipped**). PR 11.5 (deferred): permissions dialog with dual passwords.
-- PR 12: Redaction (separate PR because correctness is critical).
+- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact), PR 12.2 (search-then-redact), PR 12.3 (redaction options dialog) deferred.
 - PR 13: OCR via Tesseract.
 
 

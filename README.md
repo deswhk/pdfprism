@@ -6,9 +6,9 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 ## Status
 
-Under active development. Milestones 1–3 and PR 10, PR 10.5, PR 11 shipped; the rest of Milestone 4 (redaction, OCR) is up next. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
+Under active development. Milestones 1–3 and PR 10, PR 10.5, PR 11, PR 12 shipped; PR 13 (OCR) is next. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
 
-**What works today (through PR 11):**
+**What works today (through PR 12):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
@@ -26,12 +26,13 @@ Under active development. Milestones 1–3 and PR 10, PR 10.5, PR 11 shipped; th
 - Page operations on the current page: rotate (Ctrl+R / Ctrl+Shift+R / 180°), delete (with confirmation), insert blank page after, duplicate, move (Ctrl+Shift+M), and crop (margin dialog in PDF points)
 - Encrypted PDFs: opening password-protected files prompts for the password with an inline retry loop (wrong password shows an error banner, unlimited retries, Cancel gives up cleanly). No password caching; re-opens from Recent Files prompt again. Set, change, or remove the password on any open document via File → Security → Password... -- destructive Remove branch is guarded by a confirmation prompt.
 - View and edit document metadata via File → Properties.... Six standard Info dict fields (title, author, subject, keywords, creator, producer) are editable. A one-click **Sanitize All Fields** button clears every field for the user who wants to share a document without personally identifying info; a checkbox controls whether the XMP metadata stream is also removed (defaults to on).
+- Redact regions of a page: press R (or View → Redaction Mode), drag rectangles over content to mark it, review the pending marks, then Redaction → Apply Redactions... to permanently destroy the underlying content. Marks are non-destructive until applied; saving preserves them for later review. Redaction → Clear All Pending removes marks without applying.
 - Save (Ctrl+S) writes mutations in place; Save As (Ctrl+Shift+S) writes to a new path. Modified tabs show ` *` in the tab title; closing a modified tab prompts Save / Discard / Cancel
 - Edit menu reorganized: Find actions stay at the top; new Edit → Page submenu groups all page operations
 - Cross-document page operations via the new File → Pages submenu: Extract Pages to File (save a page range as a new PDF), Insert Pages from File (insert a range from another PDF at a chosen position), Split Document (every N pages or at specified page boundaries, with zero-padded output names), and Merge Documents (pick from open tabs with reorder, opens the result as a new tab)
 - Organize Pages panel (View → Toggle Organize Pages or F6): dockable grid view of all pages with multi-select (Ctrl/Shift), drag-to-reorder, and selection-aware operations (Rotate Right/Left/180°, Delete, Duplicate, Crop Selection, Extract Selection to File) via toolbar, context menu, or keyboard shortcuts (Ctrl+R, Delete, Ctrl+D, Ctrl+A, Ctrl+E). The Crop dialog now includes a live rendered preview of the page with the crop rectangle drawn over it, updating as you type. Hidden by default; persisted across sessions.
 
-**Coming next:** Milestone 4 continues. PR 12 is redaction (own PR because correctness is critical); PR 13 is OCR via Tesseract. PR 11.5 (permissions dialog with owner/user password distinction) is deferred pending concrete user demand.
+**Coming next:** Milestone 4 wraps up with PR 13 (OCR via Tesseract). PR 11.5 (permissions dialog with owner/user password distinction) and PR 12.1-12.3 (text-selection redact, search-redact, redaction options) are deferred pending concrete user demand.
 
 ## Scope
 

@@ -471,3 +471,194 @@ class TestSelection:
         assert page_view.selected_text == "Hello"
         page_view.clear_selection()
         assert page_view.selected_text == ""
+
+
+# ---- PR 12: Redaction mode interaction ---------------------------------
+
+
+class TestRedactionModeSetup:
+    """Tool-mode transitions to REDACTION."""
+
+    def test_redaction_mode_sets_cross_cursor(self, page_view: PageView) -> None:
+        """Positive: REDACTION mode uses cross cursor."""
+        from PySide6.QtCore import Qt
+
+        page_view.set_tool_mode(ToolMode.REDACTION)
+        assert page_view.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+
+    def test_redaction_mode_clears_text_selection(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: switching to REDACTION clears any prior text selection."""
+        page_view.set_adapter(adapter_with_doc)
+        # Simulate having some selected words
+        from pdfprism.core.types import Word
+
+        page_view._selected_words = [
+            Word(text="stub", x0=0.0, y0=0.0, x1=10.0, y1=10.0),
+        ]
+        page_view.set_tool_mode(ToolMode.REDACTION)
+        assert page_view._selected_words == []
+
+
+class TestRedactionDrag:
+    """Mouse drag interaction: emits redaction_requested with page-space coords."""
+
+    def test_press_captures_anchor(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: mouse press in REDACTION mode captures anchor position."""
+        from PySide6.QtCore import QPoint, Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.REDACTION)
+        qtbot.mousePress(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        assert page_view._redaction_anchor is not None
+
+    def test_move_creates_temp_overlay(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: mouse move after press adds a temp overlay QGraphicsRectItem."""
+        from PySide6.QtCore import QPoint, Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.REDACTION)
+        qtbot.mousePress(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        assert page_view._redaction_temp_item is None
+        qtbot.mouseMove(page_view.viewport(), pos=QPoint(200, 150))
+        assert page_view._redaction_temp_item is not None
+
+    def test_release_emits_signal_with_page_space_coords(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: valid drag release emits redaction_requested with (page_index, rect)."""
+        from PySide6.QtCore import QPoint, Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.REDACTION)
+
+        emitted: list = []
+        page_view.redaction_requested.connect(lambda p, r: emitted.append((p, r)))
+
+        qtbot.mousePress(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        qtbot.mouseMove(page_view.viewport(), pos=QPoint(200, 150))
+        qtbot.mouseRelease(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(200, 150))
+
+        assert len(emitted) == 1
+        page_index, rect = emitted[0]
+        assert page_index == 0
+        # Rect should be a 4-tuple in ascending x, y order
+        x0, y0, x1, y1 = rect
+        assert x0 <= x1 and y0 <= y1
+
+    def test_tiny_drag_does_not_emit(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: drags smaller than 5x5 scene px are ignored (accidental click)."""
+        from PySide6.QtCore import QPoint, Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.REDACTION)
+
+        emitted: list = []
+        page_view.redaction_requested.connect(lambda p, r: emitted.append((p, r)))
+
+        # Press + release with no meaningful move -- below threshold.
+        # (The threshold is 5 scene pixels; a stray click can register a
+        # tiny drag due to rounding, so we assert nothing was emitted for
+        # a same-position release.)
+        qtbot.mousePress(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        qtbot.mouseRelease(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+
+        assert emitted == []
+
+    def test_release_clears_temp_overlay(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: after release, temp overlay item is removed from scene."""
+        from PySide6.QtCore import QPoint, Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.REDACTION)
+
+        qtbot.mousePress(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        qtbot.mouseMove(page_view.viewport(), pos=QPoint(200, 150))
+        assert page_view._redaction_temp_item is not None
+        qtbot.mouseRelease(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(200, 150))
+        assert page_view._redaction_temp_item is None
+        assert page_view._redaction_anchor is None
+
+
+class TestRedactionEscapeCancel:
+    """Escape mid-drag cancels the pending redaction."""
+
+    def test_escape_mid_drag_cancels(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: Escape during a drag removes temp overlay + clears anchor."""
+        from PySide6.QtCore import QPoint, Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.REDACTION)
+
+        emitted: list = []
+        page_view.redaction_requested.connect(lambda p, r: emitted.append((p, r)))
+
+        qtbot.mousePress(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        qtbot.mouseMove(page_view.viewport(), pos=QPoint(200, 150))
+        assert page_view._redaction_temp_item is not None
+        qtbot.keyPress(page_view, Qt.Key.Key_Escape)
+        assert page_view._redaction_temp_item is None
+        assert page_view._redaction_anchor is None
+        assert emitted == []
+
+    def test_escape_without_drag_is_noop(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: Escape when no drag in progress doesn't error."""
+        from PySide6.QtCore import Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.REDACTION)
+        # No drag started. Escape should just pass through cleanly.
+        qtbot.keyPress(page_view, Qt.Key.Key_Escape)
+
+
+class TestRedactionModeIsolation:
+    """Other tool modes don't produce redaction signals."""
+
+    def test_hand_mode_no_redaction(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: drag in HAND mode doesn't emit redaction_requested."""
+        from PySide6.QtCore import QPoint, Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.HAND)
+
+        emitted: list = []
+        page_view.redaction_requested.connect(lambda p, r: emitted.append((p, r)))
+
+        qtbot.mousePress(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        qtbot.mouseMove(page_view.viewport(), pos=QPoint(200, 150))
+        qtbot.mouseRelease(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(200, 150))
+
+        assert emitted == []
+
+    def test_select_mode_no_redaction(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter, qtbot
+    ) -> None:
+        """Positive: drag in SELECT mode doesn't emit redaction_requested."""
+        from PySide6.QtCore import QPoint, Qt
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_tool_mode(ToolMode.SELECT)
+
+        emitted: list = []
+        page_view.redaction_requested.connect(lambda p, r: emitted.append((p, r)))
+
+        qtbot.mousePress(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        qtbot.mouseMove(page_view.viewport(), pos=QPoint(200, 150))
+        qtbot.mouseRelease(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(200, 150))
+
+        assert emitted == []
