@@ -86,6 +86,23 @@ class RedactionService:
             logger.info("Redacted %d word(s) on page %d", count, page_index)
         return count
 
+    def redact_hits(self, hits: list) -> int:
+        """PR 12.2: batch redact search hits (cross-page).
+
+        Delegates to adapter's add_redactions_for_hits. Empty list is
+        a no-op returning 0.
+
+        Args:
+            hits: SearchHit objects to redact.
+
+        Returns:
+            Count of redactions added.
+        """
+        count = self._adapter.add_redactions_for_hits(hits)
+        if count:
+            logger.info("Redacted %d search hit(s)", count)
+        return count
+
     def list_redactions(self) -> list[Redaction]:
         """Return all pending redactions in page-major order."""
         return self._adapter.list_redactions()

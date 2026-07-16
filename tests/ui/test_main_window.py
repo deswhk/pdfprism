@@ -2637,3 +2637,103 @@ class TestMenuOrder:
         titles = [a.text().replace("&", "") for a in menubar.actions()]
         expected = ["File", "Edit", "View", "Redaction", "Go", "Help"]
         assert titles == expected
+
+
+# ---- PR 12.2: Search-and-redact --------------------------------------
+
+
+class TestSearchAndRedactMenuAction:
+    def test_action_exists(self, main_window: MainWindow) -> None:
+        assert hasattr(main_window, "act_redaction_search")
+
+    def test_enabled_with_tab(self, main_window: MainWindow, sample_pdf_path: Path) -> None:
+        main_window._open_path(sample_pdf_path)
+        assert main_window.act_redaction_search.isEnabled() is True
+
+
+class TestSearchAndRedactSlot:
+    def test_ok_with_hits_calls_service(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: OK -> RedactionService.redact_hits called."""
+        from pdfprism.core.types import SearchHit
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+
+        stub_hits = [
+            SearchHit(page_index=0, x0=0.0, y0=0.0, x1=10.0, y1=10.0),
+        ]
+
+        class _StubDialog:
+            def __init__(self, adapter, parent):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            def selected_hits(self):
+                return stub_hits
+
+        monkeypatch.setattr(mw_mod, "SearchRedactDialog", _StubDialog)
+
+        calls: list = []
+
+        class _SpyService:
+            def __init__(self, a):
+                pass
+
+            def redact_hits(self, hits):
+                calls.append(hits)
+                return len(hits)
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
+
+        main_window._on_redaction_search()
+        assert len(calls) == 1
+        assert calls[0] == stub_hits
+
+    def test_cancel_no_service_call(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: Cancel -> no service call."""
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+
+        class _CancelDialog:
+            def __init__(self, adapter, parent):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Rejected
+
+            def selected_hits(self):
+                return []
+
+        monkeypatch.setattr(mw_mod, "SearchRedactDialog", _CancelDialog)
+
+        calls: list = []
+
+        class _SpyService:
+            def __init__(self, a):
+                pass
+
+            def redact_hits(self, hits):
+                calls.append(hits)
+                return len(hits)
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
+
+        main_window._on_redaction_search()
+        assert calls == []

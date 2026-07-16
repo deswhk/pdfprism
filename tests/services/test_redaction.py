@@ -124,3 +124,31 @@ class TestRedactWords:
 
         svc = RedactionService(adapter)
         assert svc.redact_words(page_index=0, words=[]) == 0
+
+
+class TestRedactHits:
+    """PR 12.2: service batch API for hits."""
+
+    def test_delegates_to_adapter(self) -> None:
+        """Positive: service.redact_hits -> adapter.add_redactions_for_hits."""
+        from pdfprism.core.types import SearchHit
+
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.add_redactions_for_hits.return_value = 2
+        svc = RedactionService(adapter)
+
+        hits = [
+            SearchHit(page_index=0, x0=0.0, y0=0.0, x1=10.0, y1=10.0),
+            SearchHit(page_index=1, x0=0.0, y0=0.0, x1=10.0, y1=10.0),
+        ]
+        got = svc.redact_hits(hits)
+
+        assert got == 2
+        adapter.add_redactions_for_hits.assert_called_once_with(hits)
+
+    def test_empty_hits_returns_zero(self) -> None:
+        """Positive: empty list passed through -> 0."""
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.add_redactions_for_hits.return_value = 0
+        svc = RedactionService(adapter)
+        assert svc.redact_hits([]) == 0
