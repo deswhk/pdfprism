@@ -76,6 +76,13 @@ class DocumentView(QWidget):
         self._outline_panel.page_selected.connect(self._page_view.go_to_page)
         self._page_view.page_changed.connect(self._thumbnail_panel.set_current_page)
 
+        # PR 12: redaction drag emits (page_index, rect); we route to
+        # RedactionService which creates the pending annotation.
+        # No panel rebind dance needed here -- redactions are
+        # annotations, not doc-swap operations, so the underlying
+        # pymupdf.Document is not closed/reopened.
+        self._page_view.redaction_requested.connect(self._on_redaction_requested)
+
         # OrganizePagesPanel: panel emits intent, we route through the
         # corresponding mutation methods. Each one already does the
         # adapter mutation + cache clear + panel re-bind + modified-
@@ -439,3 +446,19 @@ class DocumentView(QWidget):
         self._organize_panel.set_adapter(self._adapter)
         self._page_view.set_adapter(self._adapter)
         self._refresh_modified()
+
+    # ---- PR 12: redactions --------------------------------------------
+
+    def _on_redaction_requested(self, page_index: int, rect: tuple) -> None:
+        """Slot: PageView redaction drag -> create annotation."""
+        from pdfprism.services.redaction import RedactionService
+
+        RedactionService(self._adapter).add_redaction(page_index=page_index, rect=rect)
+        self._refresh_modified()
+        # Re-render the page so the new annotation is visible.
+        # The page_cache holds a rendered pixmap that does NOT
+        # include the annotation we just added; invalidate and
+        # trigger a repaint via a set_adapter rebind.
+        self._page_cache.clear()
+        self._page_view.set_adapter(self._adapter)
+        self._thumbnail_panel.set_adapter(self._adapter)

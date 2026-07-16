@@ -18,6 +18,7 @@ from pdfprism.core.types import (
     ExtractedImage,
     OutlineItem,
     PageInfo,
+    Redaction,
     SearchHit,
     Word,
 )
@@ -160,6 +161,131 @@ class PyMuPDFAdapter:
             # PyMuPDF raises on missing XMP in some versions; treat as no-op.
             pass
         self._is_dirty = True
+
+    # ---- PR 12: redactions --------------------------------------------
+
+    def add_redaction(self, redaction: Redaction) -> None:
+        """Add a pending redaction annotation to the document.
+
+        Redactions are two-phase: this method creates an annotation
+        (still reversible via ``remove_redaction`` or by not calling
+        ``apply_redactions``). Actual destruction of the underlying
+        content only happens on ``apply_redactions()``.
+
+        Args:
+            redaction: The Redaction to add. ``rect`` is in PDF-space
+                coordinates (points); ``fill_color`` is RGB 0-255
+                (converted internally to PyMuPDF's 0-1 float triple).
+
+        Marks the document dirty.
+        """
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= redaction.page_index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {redaction.page_index} out of range [0, {self._doc.page_count})"
+            )
+        page = self._doc[redaction.page_index]
+        rect = pymupdf.Rect(*redaction.rect)
+        # PyMuPDF fill: (r, g, b) as floats 0-1
+        fill = tuple(c / 255.0 for c in redaction.fill_color)
+        kwargs: dict = {"fill": fill, "cross_out": True}
+        if redaction.replacement_text is not None:
+            kwargs["text"] = redaction.replacement_text
+        page.add_redact_annot(rect, **kwargs)
+        self._is_dirty = True
+
+    def list_redactions(self) -> list[Redaction]:
+        """Return all pending redaction annotations in page-major order.
+
+        Walks every page, collects PDF_ANNOT_REDACT annotations, and
+        returns them as ``Redaction`` objects. Applied redactions
+        (where ``apply_redactions()`` has been called) do NOT appear
+        here -- once applied, the annotation is consumed and only the
+        destructive change remains.
+        """
+        self._require_open()
+        assert self._doc is not None
+        result: list[Redaction] = []
+        for page_index in range(self._doc.page_count):
+            page = self._doc[page_index]
+            for annot in page.annots(types=[pymupdf.PDF_ANNOT_REDACT]):
+                rect = annot.rect
+                # PyMuPDF fill: 0-1 floats; convert back to 0-255 RGB.
+                info = annot.info
+                # Some annotations may have no fill color; default to black.
+                fill_color = (0, 0, 0)
+                if annot.colors and annot.colors.get("fill"):
+                    fill = annot.colors["fill"]
+                    fill_color = tuple(int(round(c * 255)) for c in fill)
+                # Replacement text lives in annot.info["content"] (if set).
+                replacement_text = info.get("content") or None
+                result.append(
+                    Redaction(
+                        page_index=page_index,
+                        rect=(rect.x0, rect.y0, rect.x1, rect.y1),
+                        replacement_text=replacement_text,
+                        fill_color=fill_color,
+                    )
+                )
+        return result
+
+    def remove_redaction(self, page_index: int, redaction_index: int) -> None:
+        """Delete a pending redaction annotation.
+
+        Args:
+            page_index: The page containing the redaction.
+            redaction_index: 0-based index among the redactions on that
+                page (in the order returned by ``list_redactions()``
+                filtered to that page).
+
+        Raises:
+            PageOutOfRangeError: page_index invalid
+            IndexError: redaction_index out of range for the page
+        """
+        self._require_open()
+        assert self._doc is not None
+        if not 0 <= page_index < self._doc.page_count:
+            raise PageOutOfRangeError(
+                f"Page index {page_index} out of range [0, {self._doc.page_count})"
+            )
+        page = self._doc[page_index]
+        redactions = list(page.annots(types=[pymupdf.PDF_ANNOT_REDACT]))
+        if not 0 <= redaction_index < len(redactions):
+            raise IndexError(
+                f"Redaction index {redaction_index} out of range "
+                f"[0, {len(redactions)}) for page {page_index}"
+            )
+        page.delete_annot(redactions[redaction_index])
+        self._is_dirty = True
+
+    def apply_redactions(self) -> int:
+        """Destructively apply all pending redactions in the document.
+
+        Iterates over every page and calls PyMuPDF's ``apply_redactions()``.
+        Uses PyMuPDF defaults: ``images=2`` (fully redact intersecting
+        images), ``graphics=1`` (redact intersecting graphics),
+        ``text=0`` (only redact text within the redaction quad, not
+        text elsewhere on the line).
+
+        Returns the count of applied redactions. Marks the document
+        dirty. After this call, ``list_redactions()`` returns an empty
+        list -- the annotations are consumed by the destructive apply.
+        """
+        self._require_open()
+        assert self._doc is not None
+        count = 0
+        for page_index in range(self._doc.page_count):
+            page = self._doc[page_index]
+            # Count before apply (apply_redactions() removes the annots).
+            page_count = sum(1 for _ in page.annots(types=[pymupdf.PDF_ANNOT_REDACT]))
+            if page_count == 0:
+                continue
+            page.apply_redactions()
+            count += page_count
+        if count > 0:
+            self._is_dirty = True
+        return count
 
     def get_page_info(self, index: int) -> PageInfo:
         self._require_open()

@@ -33,6 +33,7 @@ from pdfprism.services.extract import ExtractService
 from pdfprism.services.pages import PageService
 from pdfprism.services.pages import merge as merge_documents
 from pdfprism.services.properties import PropertiesService
+from pdfprism.services.redaction import RedactionService
 from pdfprism.services.search import SearchScope, SearchService
 from pdfprism.ui.dialogs.about import AboutDialog
 from pdfprism.ui.dialogs.crop import CropDialog
@@ -282,6 +283,17 @@ class MainWindow(QMainWindow):
         self.act_tool_select.setCheckable(True)
         self.act_tool_select.triggered.connect(lambda: self._on_set_tool_mode(ToolMode.SELECT))
 
+        # PR 12: redaction mode -- click-drag on a page draws a
+        # pending redaction rectangle. Actual rectangle drawing
+        # logic is in PageView (sub-step 6).
+        self.act_tool_redaction = QAction("&Redaction Mode", self)
+        self.act_tool_redaction.setShortcut("R")
+        self.act_tool_redaction.setCheckable(True)
+        self.act_tool_redaction.triggered.connect(
+            lambda: self._on_set_tool_mode(ToolMode.REDACTION)
+        )
+        self.act_tool_redaction.setToolTip("Draw redaction marks on the page")
+
         self.act_copy = QAction("&Copy", self)
         self.act_copy.setShortcut(QKeySequence.StandardKey.Copy)
         self.act_copy.triggered.connect(self._on_copy)
@@ -362,6 +374,19 @@ class MainWindow(QMainWindow):
         self.act_properties.setEnabled(False)
         self.act_properties.setToolTip("View, edit, or sanitize document metadata")
 
+        # PR 12: redaction menu actions.
+        self.act_redaction_apply = QAction("&Apply Redactions...", self)
+        self.act_redaction_apply.triggered.connect(self._on_redaction_apply)
+        self.act_redaction_apply.setEnabled(False)
+        self.act_redaction_apply.setToolTip(
+            "Destructively apply all pending redactions to the document"
+        )
+
+        self.act_redaction_clear = QAction("&Clear All Pending", self)
+        self.act_redaction_clear.triggered.connect(self._on_redaction_clear)
+        self.act_redaction_clear.setEnabled(False)
+        self.act_redaction_clear.setToolTip("Remove all pending redaction marks without applying")
+
         self.act_insert_pages = QAction("&Insert Pages from File...", self)
         self.act_insert_pages.triggered.connect(self._on_insert_pages)
         self.act_insert_pages.setEnabled(False)
@@ -377,6 +402,7 @@ class MainWindow(QMainWindow):
         self._tool_action_group = QActionGroup(self)
         self._tool_action_group.addAction(self.act_tool_hand)
         self._tool_action_group.addAction(self.act_tool_select)
+        self._tool_action_group.addAction(self.act_tool_redaction)
         self._tool_action_group.setExclusive(True)
 
         self.act_fit_page = QAction("Fit &Page", self)
@@ -435,6 +461,7 @@ class MainWindow(QMainWindow):
             self.act_toggle_dark_mode,
             self.act_tool_hand,
             self.act_tool_select,
+            self.act_tool_redaction,
             self.act_copy,
             self.act_extract_text,
             self.act_extract_images,
@@ -522,14 +549,18 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.act_toggle_outline)
         view_menu.addAction(self.act_toggle_organize)
 
-        help_menu = menubar.addMenu("&Help")
-        help_menu.addAction(self.act_about)
+        # PR 12: Redaction menu (right after View, before Help).
+        redaction_menu = menubar.addMenu("&Redaction")
+        redaction_menu.addAction(self.act_redaction_apply)
+        redaction_menu.addAction(self.act_redaction_clear)
+
         view_menu.addSeparator()
         view_menu.addAction(self.act_fullscreen)
         view_menu.addAction(self.act_toggle_dark_mode)
         view_menu.addSeparator()
         view_menu.addAction(self.act_tool_hand)
         view_menu.addAction(self.act_tool_select)
+        view_menu.addAction(self.act_tool_redaction)
 
         go_menu = menubar.addMenu("&Go")
         go_menu.addAction(self.act_first_page)
@@ -541,6 +572,9 @@ class MainWindow(QMainWindow):
         go_menu.addSeparator()
         go_menu.addAction(self.act_prev_tab)
         go_menu.addAction(self.act_next_tab)
+
+        help_menu = menubar.addMenu("&Help")
+        help_menu.addAction(self.act_about)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main", self)
@@ -1080,6 +1114,9 @@ class MainWindow(QMainWindow):
         if self._tool_mode == ToolMode.HAND:
             self.act_tool_hand.setChecked(True)
             self._tool_indicator.setText("Hand")
+        elif self._tool_mode == ToolMode.REDACTION:
+            self.act_tool_redaction.setChecked(True)
+            self._tool_indicator.setText("Redaction")
         else:
             self.act_tool_select.setChecked(True)
             self._tool_indicator.setText("Select")
@@ -1380,6 +1417,79 @@ class MainWindow(QMainWindow):
             return
         tab._refresh_modified()
 
+    def _on_redaction_apply(self) -> None:
+        """Apply all pending redactions on the active tab (destructive)."""
+        tab = self._active_tab
+        if tab is None:
+            return
+        adapter = tab._adapter
+        service = RedactionService(adapter)
+        pending = service.list_redactions()
+        if not pending:
+            QMessageBox.information(
+                self,
+                "No redactions",
+                "There are no pending redaction marks to apply.",
+            )
+            return
+        # Confirmation dialog with count.
+        page_count = len({r.page_index for r in pending})
+        msg = (
+            f"This will permanently redact {len(pending)} region(s) "
+            f"across {page_count} page(s). This cannot be undone. Continue?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Apply Redactions",
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            count = service.apply()
+            adapter.save()
+        except PdfPrismError as exc:
+            QMessageBox.critical(self, "Failed to apply redactions", str(exc))
+            return
+        tab._refresh_modified()
+        # Re-render since content is now different.
+        tab._page_cache.clear()
+        tab._page_view.set_adapter(adapter)
+        tab._thumbnail_panel.set_adapter(adapter)
+        self.statusBar().showMessage(f"Applied {count} redaction(s)", 3000)
+
+    def _on_redaction_clear(self) -> None:
+        """Remove all pending redaction marks without applying."""
+        tab = self._active_tab
+        if tab is None:
+            return
+        adapter = tab._adapter
+        service = RedactionService(adapter)
+        pending = service.list_redactions()
+        if not pending:
+            self.statusBar().showMessage("No pending redactions", 3000)
+            return
+        # Delete in reverse order per page so indices stay valid.
+        # Group by page first.
+        by_page: dict[int, list[int]] = {}
+        # list_redactions returns page-major order; enumerate to get
+        # each redaction's index within its page.
+        page_local_index: dict[int, int] = {}
+        for r in pending:
+            i = page_local_index.get(r.page_index, 0)
+            by_page.setdefault(r.page_index, []).append(i)
+            page_local_index[r.page_index] = i + 1
+        for page_index, indices in by_page.items():
+            for i in reversed(indices):
+                adapter.remove_redaction(page_index, i)
+        tab._refresh_modified()
+        tab._page_cache.clear()
+        tab._page_view.set_adapter(adapter)
+        tab._thumbnail_panel.set_adapter(adapter)
+        self.statusBar().showMessage(f"Cleared {len(pending)} pending redaction(s)", 3000)
+
     def _on_about(self) -> None:
         """Help -> About slot: show the modal About dialog."""
         AboutDialog(self).exec()
@@ -1597,6 +1707,10 @@ class MainWindow(QMainWindow):
         # PR 10.5: security action -- enables with any open tab.
         self.act_security_password.setEnabled(has_tab)
         self.act_properties.setEnabled(has_tab)
+        # PR 12: redaction actions enabled with any open tab.
+        # Empty-pending case handled inside the slots.
+        self.act_redaction_apply.setEnabled(has_tab)
+        self.act_redaction_clear.setEnabled(has_tab)
         # Merge requires at least 2 open tabs.
         self.act_merge.setEnabled(self._tab_widget.count() >= 2)
 
