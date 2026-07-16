@@ -234,6 +234,51 @@ class PyMuPDFAdapter:
         self._is_dirty = True
         return len(words)
 
+    def add_redactions_for_hits(self, hits: list["SearchHit"]) -> int:
+        """PR 12.2: create one redaction annotation per SearchHit.
+
+        Used by the search-then-redact path -- user types a term into
+        the SearchRedactDialog, picks matches, and commits them as
+        pending redactions. SearchHits already carry ``page_index``
+        and ``(x0, y0, x1, y1)`` in PDF-space, so the batch API just
+        loops per-page for efficiency (one page load per page, not
+        per hit).
+
+        Args:
+            hits: SearchHit objects to redact. Empty list is a no-op
+                returning 0.
+
+        Returns:
+            Count of redactions added (== len(hits)).
+
+        Marks the document dirty when at least one redaction is added.
+        Raises PageOutOfRangeError if any hit references an invalid
+        page (defensive; shouldn't happen from a legitimate search).
+        """
+        self._require_open()
+        assert self._doc is not None
+        if not hits:
+            return 0
+        # Group by page for efficiency.
+        by_page: dict[int, list[SearchHit]] = {}
+        for hit in hits:
+            if not 0 <= hit.page_index < self._doc.page_count:
+                raise PageOutOfRangeError(
+                    f"Hit references page {hit.page_index} out of range [0, {self._doc.page_count})"
+                )
+            by_page.setdefault(hit.page_index, []).append(hit)
+        for page_index, page_hits in by_page.items():
+            page = self._doc[page_index]
+            for hit in page_hits:
+                rect = pymupdf.Rect(hit.x0, hit.y0, hit.x1, hit.y1)
+                page.add_redact_annot(
+                    rect,
+                    fill=(0.0, 0.0, 0.0),
+                    cross_out=True,
+                )
+        self._is_dirty = True
+        return len(hits)
+
     def list_redactions(self) -> list[Redaction]:
         """Return all pending redaction annotations in page-major order.
 

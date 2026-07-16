@@ -1682,3 +1682,56 @@ class TestAddRedactionsForWords:
                 )
         finally:
             adapter.close()
+
+
+class TestAddRedactionsForHits:
+    """PR 12.2: batch redaction from SearchHit list."""
+
+    def test_batch_adds_per_hit(self, mutable_pdf_path: Path) -> None:
+        """Positive: N hits -> N redaction annots + returns N."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            hits = [
+                SearchHit(page_index=0, x0=10.0, y0=10.0, x1=50.0, y1=25.0),
+                SearchHit(page_index=0, x0=60.0, y0=10.0, x1=90.0, y1=25.0),
+                SearchHit(
+                    page_index=min(1, adapter.page_count - 1),
+                    x0=10.0,
+                    y0=10.0,
+                    x1=50.0,
+                    y1=25.0,
+                ),
+            ]
+            count = adapter.add_redactions_for_hits(hits)
+            assert count == 3
+            assert len(adapter.list_redactions()) == 3
+        finally:
+            adapter.close()
+
+    def test_empty_hits_returns_zero(self, mutable_pdf_path: Path) -> None:
+        """Positive: empty list -> 0, dirty flag unchanged."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            assert adapter.is_dirty is False
+            count = adapter.add_redactions_for_hits([])
+            assert count == 0
+            assert adapter.is_dirty is False
+        finally:
+            adapter.close()
+
+    def test_invalid_page_raises(self, mutable_pdf_path: Path) -> None:
+        """Negative: hit with invalid page -> PageOutOfRangeError."""
+        from pdfprism.core.exceptions import PageOutOfRangeError
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            hits = [
+                SearchHit(page_index=999, x0=0.0, y0=0.0, x1=10.0, y1=10.0),
+            ]
+            with pytest.raises(PageOutOfRangeError):
+                adapter.add_redactions_for_hits(hits)
+        finally:
+            adapter.close()

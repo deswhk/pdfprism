@@ -45,6 +45,7 @@ from pdfprism.ui.dialogs.insert_pages import InsertPagesDialog
 from pdfprism.ui.dialogs.merge import MergeDialog
 from pdfprism.ui.dialogs.password import PasswordDialog
 from pdfprism.ui.dialogs.properties import PropertiesDialog
+from pdfprism.ui.dialogs.search_redact import SearchRedactDialog
 from pdfprism.ui.dialogs.split import SplitDialog
 from pdfprism.ui.theme import DARK_QSS
 from pdfprism.ui.widgets.document_view import DocumentView
@@ -387,6 +388,14 @@ class MainWindow(QMainWindow):
         self.act_redaction_clear.setEnabled(False)
         self.act_redaction_clear.setToolTip("Remove all pending redaction marks without applying")
 
+        # PR 12.2: search-then-redact.
+        self.act_redaction_search = QAction("&Search and Redact...", self)
+        self.act_redaction_search.triggered.connect(self._on_redaction_search)
+        self.act_redaction_search.setEnabled(False)
+        self.act_redaction_search.setToolTip(
+            "Search across the document and redact selected matches"
+        )
+
         self.act_insert_pages = QAction("&Insert Pages from File...", self)
         self.act_insert_pages.triggered.connect(self._on_insert_pages)
         self.act_insert_pages.setEnabled(False)
@@ -553,6 +562,8 @@ class MainWindow(QMainWindow):
         redaction_menu = menubar.addMenu("&Redaction")
         redaction_menu.addAction(self.act_redaction_apply)
         redaction_menu.addAction(self.act_redaction_clear)
+        redaction_menu.addSeparator()
+        redaction_menu.addAction(self.act_redaction_search)
 
         view_menu.addSeparator()
         view_menu.addAction(self.act_fullscreen)
@@ -1490,6 +1501,32 @@ class MainWindow(QMainWindow):
         tab._thumbnail_panel.set_adapter(adapter)
         self.statusBar().showMessage(f"Cleared {len(pending)} pending redaction(s)", 3000)
 
+    def _on_redaction_search(self) -> None:
+        """Open SearchRedactDialog; commit selected hits as pending redactions."""
+        tab = self._active_tab
+        if tab is None:
+            return
+        adapter = tab._adapter
+        dlg = SearchRedactDialog(adapter, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        hits = dlg.selected_hits()
+        if not hits:
+            return
+        service = RedactionService(adapter)
+        try:
+            count = service.redact_hits(hits)
+        except PdfPrismError as exc:
+            QMessageBox.critical(self, "Failed to add redactions", str(exc))
+            return
+        if not count:
+            return
+        tab._refresh_modified()
+        tab._page_cache.clear()
+        tab._page_view.set_adapter(adapter)
+        tab._thumbnail_panel.set_adapter(adapter)
+        self.statusBar().showMessage(f"Added {count} pending redaction(s) from search", 3000)
+
     def _on_about(self) -> None:
         """Help -> About slot: show the modal About dialog."""
         AboutDialog(self).exec()
@@ -1711,6 +1748,7 @@ class MainWindow(QMainWindow):
         # Empty-pending case handled inside the slots.
         self.act_redaction_apply.setEnabled(has_tab)
         self.act_redaction_clear.setEnabled(has_tab)
+        self.act_redaction_search.setEnabled(has_tab)
         # Merge requires at least 2 open tabs.
         self.act_merge.setEnabled(self._tab_widget.count() >= 2)
 
