@@ -662,3 +662,75 @@ class TestRedactionModeIsolation:
         qtbot.mouseRelease(page_view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(200, 150))
 
         assert emitted == []
+
+
+# ---- PR 12.1: text-selection redaction (slot-focused) ---------------------
+
+
+class TestRedactSelectionSlot:
+    """PR 12.1: _on_redact_selection slot and its signal emission."""
+
+    def test_slot_emits_signal_with_current_selection(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: slot emits (current_page, list-of-selected-Words)."""
+        from pdfprism.core.types import Word
+
+        page_view.set_adapter(adapter_with_doc)
+        words = [
+            Word(text="A", x0=0.0, y0=0.0, x1=10.0, y1=10.0),
+            Word(text="B", x0=15.0, y0=0.0, x1=25.0, y1=10.0),
+        ]
+        page_view._selected_words = list(words)
+        page_view._current_page = 0
+
+        emitted: list = []
+        page_view.redact_selection_requested.connect(lambda p, w: emitted.append((p, w)))
+        page_view._on_redact_selection()
+
+        assert len(emitted) == 1
+        got_page, got_words = emitted[0]
+        assert got_page == 0
+        assert got_words == words
+
+    def test_slot_noop_without_selection(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: slot does not emit when no words are selected."""
+        page_view.set_adapter(adapter_with_doc)
+        page_view._selected_words = []
+
+        emitted: list = []
+        page_view.redact_selection_requested.connect(lambda p, w: emitted.append((p, w)))
+        page_view._on_redact_selection()
+        assert emitted == []
+
+    def test_slot_emits_copy_of_selection(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: emitted list is decoupled from internal state.
+
+        Slot emits list(self._selected_words), so if selection is
+        cleared afterwards the receiver still holds the words.
+        """
+        from pdfprism.core.types import Word
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view._selected_words = [
+            Word(text="A", x0=0.0, y0=0.0, x1=10.0, y1=10.0),
+        ]
+        page_view._current_page = 0
+
+        received_words: list = []
+        page_view.redact_selection_requested.connect(lambda p, w: received_words.extend(w))
+        page_view._on_redact_selection()
+
+        # After emit, clear internal selection
+        page_view._selected_words = []
+        # Received words should still have the original entries
+        assert len(received_words) == 1
+        assert received_words[0].text == "A"
+
+    def test_signal_exists(self, page_view: PageView) -> None:
+        """Positive: redact_selection_requested signal is defined on class."""
+        assert hasattr(page_view, "redact_selection_requested")

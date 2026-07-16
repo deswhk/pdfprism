@@ -417,3 +417,62 @@ class TestOrganizeSignalWiring:
         assert mutable_view.is_modified is False
         mutable_view.organize_panel.crop_requested.emit([0], (5.0, 5.0, 5.0, 5.0))
         assert mutable_view.is_modified is True
+
+
+class TestRedactSelectionSlot:
+    """PR 12.1: _on_redact_selection_requested routes to service."""
+
+    def test_delegates_to_service(self, mutable_view, monkeypatch) -> None:
+        """Positive: slot calls RedactionService.redact_words with args."""
+        from pdfprism.core.types import Word
+
+        calls: list = []
+
+        class _SpyService:
+            def __init__(self, a):
+                pass
+
+            def redact_words(self, page_index, words):
+                calls.append((page_index, list(words)))
+                return len(words)
+
+        # Note: DocumentView imports RedactionService lazily inside the slot.
+        # We monkeypatch on the module that's imported at slot-call time.
+        import pdfprism.services.redaction as red_mod
+
+        monkeypatch.setattr(red_mod, "RedactionService", _SpyService)
+
+        words = [Word(text="x", x0=0.0, y0=0.0, x1=10.0, y1=10.0)]
+        mutable_view._on_redact_selection_requested(0, words)
+
+        assert len(calls) == 1
+        got_page, got_words = calls[0]
+        assert got_page == 0
+        assert got_words == words
+
+    def test_clears_selection_after_redact(self, mutable_view, monkeypatch) -> None:
+        """Positive: slot clears PageView selection after committing redactions."""
+        from pdfprism.core.types import Word
+
+        cleared: list = []
+        monkeypatch.setattr(
+            mutable_view._page_view,
+            "clear_selection",
+            lambda: cleared.append(True),
+        )
+
+        import pdfprism.services.redaction as red_mod
+
+        class _StubService:
+            def __init__(self, a):
+                pass
+
+            def redact_words(self, page_index, words):
+                return len(words)
+
+        monkeypatch.setattr(red_mod, "RedactionService", _StubService)
+
+        mutable_view._on_redact_selection_requested(
+            0, [Word(text="x", x0=0.0, y0=0.0, x1=10.0, y1=10.0)]
+        )
+        assert cleared == [True]

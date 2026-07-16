@@ -1423,7 +1423,9 @@ Redactions...`` is destructive-then-auto-save (per Q6 in the design
 Q&A: users clicking Apply have committed intent; asking them to
 save separately after would be a UX trap).
 
-**Deferred (PR 12.1 / 12.2 / 12.3 / M5).** PR 12 ships the
+**PR 12.1: text-selection redaction.** PR 12.1 adds a right-click "Redact Selection" action to PageView’s context menu, available whenever there is a text selection (regardless of tool mode -- matches Copy / Extract). Each selected Word gets its own redaction annotation (per-word rects, not a union rect) -- this avoids redacting whitespace between multi-line selections and unrelated content in multi-column layouts. Uses session defaults for fill color (black) and replacement text (none); customization is what PR 12.3 is for. Adapter gains ``add_redactions_for_words(page_index, words)``; service gains ``redact_words(page_index, words)``; PageView emits ``redact_selection_requested(page_index, list[Word])`` which DocumentView routes through the service.
+
+**Deferred (PR 12.2 / 12.3 / M5).** PR 12 ships the
 foundation: rectangle-drag drawing on visible pages. Text-selection
 redaction (right-click selected text → Redact) is PR 12.1;
 search-then-redact ("find every occurrence of 'John Smith' →
@@ -1523,7 +1525,7 @@ work.
 - PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
 - PR 10.5: Set / change / remove passwords on save; CryptDialog (**shipped**).
 - PR 11: Metadata sanitization (**shipped**). PR 11.5 (deferred): permissions dialog with dual passwords.
-- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact), PR 12.2 (search-then-redact), PR 12.3 (redaction options dialog) deferred.
+- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact, **shipped**). PR 12.2 (search-then-redact), PR 12.3 (redaction options dialog) deferred.
 - PR 13: OCR via Tesseract.
 
 
