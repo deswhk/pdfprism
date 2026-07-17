@@ -3030,3 +3030,65 @@ class TestApplyAndSaveAsHelper:
 
         main_window._apply_redactions_and_save_as(tab, adapter, _StubService(adapter))
         assert crit_calls == [True]
+
+
+# ---- PR 14a: Options change restyles pending marks ---------------
+
+
+class TestRestylePendingMatchingOldDefaults:
+    def test_no_op_when_old_equals_new(self, main_window: MainWindow, monkeypatch) -> None:
+        """Positive: helper returns early when old == new."""
+        from pdfprism.ui import main_window as mw_mod
+
+        call_log: list = []
+
+        class _SpyService:
+            def __init__(self, a, **kwargs):
+                pass
+
+            def update_pending_matching_defaults(self, current_defaults, new_defaults):
+                call_log.append((current_defaults, new_defaults))
+                return 0
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
+
+        main_window._restyle_pending_matching_old_defaults(
+            old_fill=main_window._redaction_fill_color,
+            old_text=main_window._redaction_replacement_text,
+        )
+        # No update call: helper returned early
+        assert call_log == []
+
+    def test_iterates_open_tabs(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: helper calls update on each open tab's adapter."""
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        call_log: list = []
+
+        class _SpyService:
+            def __init__(self, a, **kwargs):
+                pass
+
+            def update_pending_matching_defaults(self, current_defaults, new_defaults):
+                call_log.append((current_defaults, new_defaults))
+                return 0
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
+
+        # Simulate: change happened
+        old_fill = (0, 0, 0)
+        old_text: str | None = None
+        main_window._redaction_fill_color = (255, 0, 0)
+        main_window._redaction_replacement_text = "[NEW]"
+
+        main_window._restyle_pending_matching_old_defaults(old_fill=old_fill, old_text=old_text)
+        assert len(call_log) == 1
+        current_defaults, new_defaults = call_log[0]
+        assert current_defaults == (old_fill, old_text)
+        assert new_defaults == ((255, 0, 0), "[NEW]")

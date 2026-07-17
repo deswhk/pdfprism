@@ -19,6 +19,7 @@ from pdfprism.core.types import (
     OutlineItem,
     PageInfo,
     Redaction,
+    RedactionGroup,
     SearchHit,
     Word,
 )
@@ -192,7 +193,16 @@ class PyMuPDFAdapter:
         kwargs: dict = {"fill": fill, "cross_out": True}
         if redaction.replacement_text is not None:
             kwargs["text"] = redaction.replacement_text
-        page.add_redact_annot(rect, **kwargs)
+        annot = page.add_redact_annot(rect, **kwargs)
+        # PR 14a workaround for PyMuPDF gap: the ``text=`` kwarg is used at
+        # apply time but does not round-trip via ``annot.info``. Mirror the
+        # replacement text into ``info["content"]`` so ``list_redactions``
+        # can read it back correctly.
+        if redaction.replacement_text is not None:
+            info = annot.info
+            info["content"] = redaction.replacement_text
+            annot.set_info(info)
+            annot.update()
         self._is_dirty = True
 
     def add_redactions_for_words(
@@ -237,7 +247,13 @@ class PyMuPDFAdapter:
             kwargs: dict = {"fill": fill, "cross_out": True}
             if replacement_text is not None:
                 kwargs["text"] = replacement_text
-            page.add_redact_annot(rect, **kwargs)
+            annot = page.add_redact_annot(rect, **kwargs)
+            # PR 14a: mirror text into info.content for round-trip
+            if replacement_text is not None:
+                info = annot.info
+                info["content"] = replacement_text
+                annot.set_info(info)
+                annot.update()
         self._is_dirty = True
         return len(words)
 
@@ -288,7 +304,13 @@ class PyMuPDFAdapter:
                 kwargs: dict = {"fill": fill, "cross_out": True}
                 if replacement_text is not None:
                     kwargs["text"] = replacement_text
-                page.add_redact_annot(rect, **kwargs)
+                annot = page.add_redact_annot(rect, **kwargs)
+                # PR 14a: mirror text into info.content for round-trip
+                if replacement_text is not None:
+                    info = annot.info
+                    info["content"] = replacement_text
+                    annot.set_info(info)
+                    annot.update()
         self._is_dirty = True
         return len(hits)
 
@@ -326,6 +348,273 @@ class PyMuPDFAdapter:
                     )
                 )
         return result
+
+    def get_text_in_rect(self, page_index: int, rect: tuple[float, float, float, float]) -> str:
+        """PR 14a: extract text within a rectangle on a page.
+
+        Uses PyMuPDF's ``page.get_textbox`` to pull text spanning the
+        given rectangle. Returns empty string when the region contains
+        no extractable text (image regions, blank areas). Whitespace
+        is preserved as-is; normalization for grouping happens in
+        ``_normalize_group_text`` when building groups.
+        """
+        self._require_open()
+        assert self._doc is not None
+        if not (0 <= page_index < self._doc.page_count):
+            raise PageOutOfRangeError(page_index, self._doc.page_count)
+        page = self._doc[page_index]
+        rect_obj = pymupdf.Rect(*rect)
+        text = page.get_textbox(rect_obj) or ""
+        return str(text)
+
+    @staticmethod
+    def _normalize_group_text(text: str) -> str:
+        """PR 14a: normalize extracted text for group key equivalence.
+
+        Case-insensitive + whitespace-collapsed. Empty strings pass
+        through unchanged so they can be distinguished from real text.
+        """
+        if not text:
+            return ""
+        return " ".join(text.split()).lower()
+
+    def list_redactions_grouped(
+        self,
+        session_fill: tuple[int, int, int] = (0, 0, 0),
+        session_text: str | None = None,
+    ) -> list["RedactionGroup"]:
+        """PR 14a: return pending redactions grouped by normalized text.
+
+        Groups pending marks by their normalized extracted text (from
+        ``get_text_in_rect`` + ``_normalize_group_text``). Marks with
+        empty extracted text (image regions, whitespace-only) become
+        singleton groups keyed by ``__region__:page:page_index``.
+
+        ``is_customized`` per group is computed by comparing the first
+        mark's fill/text to the supplied session defaults. All marks
+        in a group share styling by design (group-atomic principle),
+        so the first mark's values are representative.
+
+        Groups are ordered by first-appearance page/rect for stable
+        listing in the UI.
+        """
+        self._require_open()
+        # Group by (normalized_text_key, display_text). Preserve first-seen
+        # display text for the group label (matches how humans think about
+        # the entity: the capitalization they typed).
+        groups_map: dict[str, dict] = {}
+        insertion_order: list[str] = []
+
+        for redaction in self.list_redactions():
+            raw_text = self.get_text_in_rect(redaction.page_index, redaction.rect)
+            normalized = self._normalize_group_text(raw_text)
+
+            if not normalized:
+                # Region-based mark: singleton group per mark
+                key = f"__region__:page:{redaction.page_index}:{redaction.rect}"
+                display = f"(image region, page {redaction.page_index + 1})"
+            else:
+                key = normalized
+                display = raw_text.strip()
+
+            if key not in groups_map:
+                groups_map[key] = {"display": display, "marks": []}
+                insertion_order.append(key)
+            groups_map[key]["marks"].append(redaction)
+
+        result: list[RedactionGroup] = []
+        for key in insertion_order:
+            entry = groups_map[key]
+            marks = entry["marks"]
+            # is_customized: any mark differing from session defaults means
+            # customized. Per group-atomic principle, all marks in a group
+            # should have the same styling; take the first as representative.
+            first = marks[0]
+            is_customized = (
+                first.fill_color != session_fill or first.replacement_text != session_text
+            )
+            result.append(
+                RedactionGroup(
+                    text=entry["display"],
+                    normalized_text=key,
+                    marks=marks,
+                    is_customized=is_customized,
+                )
+            )
+        return result
+
+    def update_redaction_group(
+        self,
+        text_query: str,
+        fill_color: tuple[int, int, int],
+        replacement_text: str | None,
+    ) -> int:
+        """PR 14a: update fill/text on all marks in a group.
+
+        Groups are keyed by normalized extracted text. ``text_query``
+        should be either the normalized_text of a real text group or a
+        synthetic ``__region__:page:N:...`` key for singleton region
+        groups. Iterates pending redaction annotations, updates each
+        matching mark's fill and replacement text. Returns the count
+        of marks updated.
+
+        Group atomicity: all marks in a group share styling. Callers
+        pass a single (fill, text) tuple; every mark in the group
+        adopts these values uniformly.
+        """
+        self._require_open()
+        assert self._doc is not None
+        updated = 0
+        # PyMuPDF color: 0-1 floats
+        fill_float = tuple(c / 255.0 for c in fill_color)
+        for page_index in range(self._doc.page_count):
+            page = self._doc[page_index]
+            to_recreate: list[tuple[float, float, float, float]] = []
+            for annot in page.annots(types=[pymupdf.PDF_ANNOT_REDACT]):
+                raw = self.get_text_in_rect(
+                    page_index,
+                    (annot.rect.x0, annot.rect.y0, annot.rect.x1, annot.rect.y1),
+                )
+                normalized = self._normalize_group_text(raw)
+                if normalized:
+                    if normalized != text_query:
+                        continue
+                else:
+                    rect_tuple = (
+                        annot.rect.x0,
+                        annot.rect.y0,
+                        annot.rect.x1,
+                        annot.rect.y1,
+                    )
+                    expected_key = f"__region__:page:{page_index}:{rect_tuple}"
+                    if text_query != expected_key:
+                        continue
+                to_recreate.append((annot.rect.x0, annot.rect.y0, annot.rect.x1, annot.rect.y1))
+            for annot in list(page.annots(types=[pymupdf.PDF_ANNOT_REDACT])):
+                rect_tuple = (annot.rect.x0, annot.rect.y0, annot.rect.x1, annot.rect.y1)
+                if rect_tuple in to_recreate:
+                    page.delete_annot(annot)
+            for rect_tuple in to_recreate:
+                rect = pymupdf.Rect(*rect_tuple)
+                kwargs: dict = {"fill": fill_float, "cross_out": True}
+                if replacement_text is not None:
+                    kwargs["text"] = replacement_text
+                new_annot = page.add_redact_annot(rect, **kwargs)
+                if replacement_text is not None:
+                    info = new_annot.info
+                    info["content"] = replacement_text
+                    new_annot.set_info(info)
+                    new_annot.update()
+                updated += 1
+        if updated > 0:
+            self._is_dirty = True
+        return updated
+
+    def remove_redaction_group(self, text_query: str) -> int:
+        """PR 14a: delete all pending marks in a group matching text_query.
+
+        Same grouping semantics as ``update_redaction_group``. Returns
+        the count of marks removed.
+        """
+        self._require_open()
+        assert self._doc is not None
+        removed = 0
+        for page_index in range(self._doc.page_count):
+            page = self._doc[page_index]
+            # Collect matching annotations first, then delete
+            # (mutating during iteration is unsafe with PyMuPDF).
+            to_delete: list = []
+            for annot in page.annots(types=[pymupdf.PDF_ANNOT_REDACT]):
+                raw = self.get_text_in_rect(
+                    page_index,
+                    (annot.rect.x0, annot.rect.y0, annot.rect.x1, annot.rect.y1),
+                )
+                normalized = self._normalize_group_text(raw)
+                if normalized:
+                    if normalized != text_query:
+                        continue
+                else:
+                    rect_tuple = (
+                        annot.rect.x0,
+                        annot.rect.y0,
+                        annot.rect.x1,
+                        annot.rect.y1,
+                    )
+                    expected_key = f"__region__:page:{page_index}:{rect_tuple}"
+                    if text_query != expected_key:
+                        continue
+                to_delete.append(annot)
+            for annot in to_delete:
+                page.delete_annot(annot)
+                removed += 1
+        if removed > 0:
+            self._is_dirty = True
+        return removed
+
+    def update_pending_matching_defaults(
+        self,
+        current_defaults: tuple[tuple[int, int, int], str | None],
+        new_defaults: tuple[tuple[int, int, int], str | None],
+    ) -> int:
+        """PR 14a: restyle marks whose fill+text match current defaults.
+
+        Used by the Options-change hook: when session defaults change
+        from ``current_defaults`` to ``new_defaults``, marks whose fill
+        and text match the OLD defaults are treated as Global marks and
+        get their fill/text updated to the NEW defaults. Marks with
+        different fill/text (Custom marks) are left untouched.
+
+        This preserves the group-atomic principle: all marks in a
+        Global group share styling; all in a Custom group share their
+        own styling; Options changes touch only the Global set.
+
+        Returns the count of marks updated.
+        """
+        self._require_open()
+        assert self._doc is not None
+        current_fill, current_text = current_defaults
+        new_fill, new_text = new_defaults
+        updated = 0
+        new_fill_float = tuple(c / 255.0 for c in new_fill)
+        for page_index in range(self._doc.page_count):
+            page = self._doc[page_index]
+            # Collect matching annotations first (delete+recreate cannot happen
+            # while iterating live annots without invalidation).
+            to_recreate: list[tuple[tuple[float, float, float, float], ...]] = []
+            for annot in page.annots(types=[pymupdf.PDF_ANNOT_REDACT]):
+                annot_fill = (0, 0, 0)
+                if annot.colors and annot.colors.get("fill"):
+                    fill = annot.colors["fill"]
+                    annot_fill = tuple(int(round(c * 255)) for c in fill)
+                annot_text = annot.info.get("content") or None
+                if annot_fill != current_fill:
+                    continue
+                if annot_text != current_text:
+                    continue
+                to_recreate.append((annot.rect.x0, annot.rect.y0, annot.rect.x1, annot.rect.y1))
+            # Delete all matching annots, then re-add with new values. Delete
+            # phase and recreate phase are separated so the iterator in the
+            # collect phase doesn't become invalidated.
+            for annot in list(page.annots(types=[pymupdf.PDF_ANNOT_REDACT])):
+                rect_tuple = (annot.rect.x0, annot.rect.y0, annot.rect.x1, annot.rect.y1)
+                if rect_tuple in to_recreate:
+                    page.delete_annot(annot)
+            for rect_tuple in to_recreate:
+                rect = pymupdf.Rect(*rect_tuple)
+                kwargs: dict = {"fill": new_fill_float, "cross_out": True}
+                if new_text is not None:
+                    kwargs["text"] = new_text
+                new_annot = page.add_redact_annot(rect, **kwargs)
+                # Mirror text into info.content for round-trip readability.
+                if new_text is not None:
+                    info = new_annot.info
+                    info["content"] = new_text
+                    new_annot.set_info(info)
+                    new_annot.update()
+                updated += 1
+        if updated > 0:
+            self._is_dirty = True
+        return updated
 
     def remove_redaction(self, page_index: int, redaction_index: int) -> None:
         """Delete a pending redaction annotation.

@@ -1671,6 +1671,11 @@ class MainWindow(QMainWindow):
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        # PR 14a: capture OLD session defaults before overwriting -- we use
+        # these to identify which pending marks were "Global" (matching
+        # old defaults) so they can be restyled to the new defaults.
+        old_fill = self._redaction_fill_color
+        old_text = self._redaction_replacement_text
         # Update in-memory session state
         self._redaction_fill_color = dlg.fill_color
         self._redaction_replacement_text = dlg.replacement_text
@@ -1695,6 +1700,11 @@ class MainWindow(QMainWindow):
         settings.setValue("redaction/graphics", self._redaction_graphics)
         settings.setValue("redaction/text", self._redaction_text)
         self._propagate_redaction_options()
+        # PR 14a: restyle pending marks that were Global (i.e., match old defaults)
+        self._restyle_pending_matching_old_defaults(
+            old_fill=old_fill,
+            old_text=old_text,
+        )
         self.statusBar().showMessage("Redaction options saved", 3000)
 
     def _propagate_redaction_options(self) -> None:
@@ -1706,6 +1716,40 @@ class MainWindow(QMainWindow):
                     self._redaction_fill_color,
                     self._redaction_replacement_text,
                 )
+
+    def _restyle_pending_matching_old_defaults(
+        self,
+        old_fill: tuple[int, int, int],
+        old_text: str | None,
+    ) -> None:
+        """PR 14a: on Options change, restyle pending marks matching old defaults."""
+        new_fill = self._redaction_fill_color
+        new_text = self._redaction_replacement_text
+        if old_fill == new_fill and old_text == new_text:
+            return  # no change
+        for i in range(self._tab_widget.count()):
+            tab = self._tab_widget.widget(i)
+            if not hasattr(tab, "_adapter"):
+                continue
+            adapter = tab._adapter
+            try:
+                service = RedactionService(
+                    adapter,
+                    fill_color=new_fill,
+                    replacement_text=new_text,
+                )
+                count = service.update_pending_matching_defaults(
+                    current_defaults=(old_fill, old_text),
+                    new_defaults=(new_fill, new_text),
+                )
+            except PdfPrismError:
+                # Adapter unavailable (tab still loading?); skip.
+                continue
+            if count > 0:
+                tab._refresh_modified()
+                tab._page_cache.clear()
+                tab._page_view.set_adapter(adapter)
+                tab._thumbnail_panel.set_adapter(adapter)
 
     def _on_about(self) -> None:
         """Help -> About slot: show the modal About dialog."""

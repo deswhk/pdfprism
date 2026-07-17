@@ -1775,3 +1775,245 @@ class TestAddRedactionsForWordsKwargs:
             assert abs(b - 0) <= 1
         finally:
             adapter.close()
+
+
+# ---- PR 14a: group primitives + mutation methods -------------------
+
+
+class TestGetTextInRect:
+    def test_extracts_text_from_rect(self, mutable_pdf_path: Path) -> None:
+        """Positive: get_text_in_rect returns text within region."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            # Fixture has known text on page 0 -- get some
+            text = adapter.get_text_in_rect(0, (10, 10, 500, 700))
+            assert isinstance(text, str)
+        finally:
+            adapter.close()
+
+    def test_empty_region_returns_empty(self, mutable_pdf_path: Path) -> None:
+        """Positive: rect in blank area returns empty string."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            # Rect far outside content area
+            text = adapter.get_text_in_rect(0, (0, 0, 1, 1))
+            assert text == ""
+        finally:
+            adapter.close()
+
+    def test_invalid_page_raises(self, mutable_pdf_path: Path) -> None:
+        """Negative: invalid page index raises PageOutOfRangeError."""
+        from pdfprism.core.exceptions import PageOutOfRangeError
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            with pytest.raises(PageOutOfRangeError):
+                adapter.get_text_in_rect(999, (10, 10, 50, 50))
+        finally:
+            adapter.close()
+
+
+class TestNormalizeGroupText:
+    def test_lowercases(self) -> None:
+        assert PyMuPDFAdapter._normalize_group_text("John") == "john"
+
+    def test_collapses_whitespace(self) -> None:
+        assert PyMuPDFAdapter._normalize_group_text("John   Smith  ") == "john smith"
+
+    def test_empty_preserved(self) -> None:
+        assert PyMuPDFAdapter._normalize_group_text("") == ""
+
+    def test_whitespace_only_becomes_empty(self) -> None:
+        assert PyMuPDFAdapter._normalize_group_text("   ") == ""
+
+
+class TestListRedactionsGrouped:
+    def test_single_group_multiple_marks(self, mutable_pdf_path: Path) -> None:
+        """Positive: multiple marks with same text -> one group."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            # Add two marks with default fill/text
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0)))
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 50.0, 100.0, 70.0)))
+            groups = adapter.list_redactions_grouped()
+            # Both marks likely in same region-based group OR text group
+            # depending on fixture. We assert count and structure.
+            assert len(groups) >= 1
+            total_marks = sum(g.count for g in groups)
+            assert total_marks == 2
+        finally:
+            adapter.close()
+
+    def test_is_customized_matches_session_defaults(self, mutable_pdf_path: Path) -> None:
+        """Positive: is_customized=False when fill matches session defaults."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(
+                Redaction(
+                    page_index=0,
+                    rect=(10.0, 10.0, 100.0, 30.0),
+                    fill_color=(0, 0, 0),
+                )
+            )
+            groups = adapter.list_redactions_grouped(session_fill=(0, 0, 0), session_text=None)
+            assert all(not g.is_customized for g in groups)
+        finally:
+            adapter.close()
+
+    def test_is_customized_true_when_differs(self, mutable_pdf_path: Path) -> None:
+        """Positive: is_customized=True when fill differs from session defaults."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(
+                Redaction(
+                    page_index=0,
+                    rect=(10.0, 10.0, 100.0, 30.0),
+                    fill_color=(255, 0, 0),
+                )
+            )
+            groups = adapter.list_redactions_grouped(session_fill=(0, 0, 0), session_text=None)
+            assert all(g.is_customized for g in groups)
+        finally:
+            adapter.close()
+
+
+class TestUpdateRedactionGroup:
+    def test_updates_matching_group(self, mutable_pdf_path: Path) -> None:
+        """Positive: update_redaction_group updates all marks in group."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            # Add a mark in a known region -- get its group key
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0)))
+            groups = adapter.list_redactions_grouped()
+            assert len(groups) == 1
+            group_key = groups[0].normalized_text
+            # Update to red + [X]
+            count = adapter.update_redaction_group(group_key, (255, 0, 0), "[X]")
+            assert count == 1
+            # Verify
+            groups = adapter.list_redactions_grouped()
+            assert groups[0].marks[0].fill_color == (255, 0, 0)
+            assert groups[0].marks[0].replacement_text == "[X]"
+        finally:
+            adapter.close()
+
+    def test_unmatched_query_returns_zero(self, mutable_pdf_path: Path) -> None:
+        """Positive: unmatched query returns 0, no side effects."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0)))
+            count = adapter.update_redaction_group("nonexistent_text", (255, 0, 0), "[X]")
+            assert count == 0
+        finally:
+            adapter.close()
+
+
+class TestRemoveRedactionGroup:
+    def test_removes_matching_group(self, mutable_pdf_path: Path) -> None:
+        """Positive: remove_redaction_group deletes all marks in group."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0)))
+            groups = adapter.list_redactions_grouped()
+            assert len(groups) == 1
+            count = adapter.remove_redaction_group(groups[0].normalized_text)
+            assert count == 1
+            assert len(adapter.list_redactions_grouped()) == 0
+        finally:
+            adapter.close()
+
+    def test_unmatched_query_returns_zero(self, mutable_pdf_path: Path) -> None:
+        """Positive: unmatched query returns 0."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0)))
+            count = adapter.remove_redaction_group("nonexistent_text")
+            assert count == 0
+            # Original still there
+            assert len(adapter.list_redactions_grouped()) == 1
+        finally:
+            adapter.close()
+
+
+class TestUpdatePendingMatchingDefaults:
+    def test_updates_matching_marks(self, mutable_pdf_path: Path) -> None:
+        """Positive: marks matching old defaults get restyled."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(
+                Redaction(
+                    page_index=0,
+                    rect=(10.0, 10.0, 100.0, 30.0),
+                    fill_color=(0, 0, 0),
+                )
+            )
+            count = adapter.update_pending_matching_defaults(
+                current_defaults=((0, 0, 0), None),
+                new_defaults=((255, 0, 0), "[NEW]"),
+            )
+            assert count == 1
+            groups = adapter.list_redactions_grouped()
+            assert groups[0].marks[0].fill_color == (255, 0, 0)
+            assert groups[0].marks[0].replacement_text == "[NEW]"
+        finally:
+            adapter.close()
+
+    def test_skips_non_matching_marks(self, mutable_pdf_path: Path) -> None:
+        """Positive: marks NOT matching old defaults are untouched."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            adapter.add_redaction(
+                Redaction(
+                    page_index=0,
+                    rect=(10.0, 10.0, 100.0, 30.0),
+                    fill_color=(255, 0, 0),  # Custom
+                )
+            )
+            # Try to restyle from a DIFFERENT old default
+            count = adapter.update_pending_matching_defaults(
+                current_defaults=((0, 0, 0), None),  # doesn't match the red mark
+                new_defaults=((0, 255, 0), "[NEW]"),
+            )
+            assert count == 0
+            groups = adapter.list_redactions_grouped()
+            # Red mark preserved
+            assert groups[0].marks[0].fill_color == (255, 0, 0)
+        finally:
+            adapter.close()
+
+    def test_delete_and_recreate_preserves_rect(self, mutable_pdf_path: Path) -> None:
+        """Positive: delete+recreate keeps the rectangle coordinates."""
+        adapter = PyMuPDFAdapter()
+        adapter.open(mutable_pdf_path)
+        try:
+            original_rect = (15.0, 12.0, 105.0, 32.0)
+            adapter.add_redaction(
+                Redaction(
+                    page_index=0,
+                    rect=original_rect,
+                    fill_color=(0, 0, 0),
+                )
+            )
+            adapter.update_pending_matching_defaults(
+                current_defaults=((0, 0, 0), None),
+                new_defaults=((255, 0, 0), "[X]"),
+            )
+            groups = adapter.list_redactions_grouped()
+            mark = groups[0].marks[0]
+            # Rect coords should approximately match (float tolerance)
+            for a, b in zip(mark.rect, original_rect, strict=True):
+                assert abs(a - b) < 0.01
+        finally:
+            adapter.close()

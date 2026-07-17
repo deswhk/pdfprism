@@ -199,3 +199,51 @@ class TestSessionDefaults:
         result = svc.apply(images=1, graphics=0, text=1)
         assert result == 3
         adapter.apply_redactions.assert_called_once_with(images=1, graphics=0, text=1)
+
+
+# ---- PR 14a: group primitives + mutation delegates ---------------
+
+
+class TestGroupServiceDelegates:
+    def test_list_redactions_grouped_delegates(self) -> None:
+        """Positive: service.list_redactions_grouped delegates to adapter."""
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.list_redactions_grouped.return_value = []
+        svc = RedactionService(adapter)
+        got = svc.list_redactions_grouped(session_fill=(0, 0, 0), session_text=None)
+        assert got == []
+        adapter.list_redactions_grouped.assert_called_once_with(
+            session_fill=(0, 0, 0), session_text=None
+        )
+
+    def test_update_redaction_group_delegates(self) -> None:
+        """Positive: service.update_redaction_group delegates."""
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.update_redaction_group.return_value = 3
+        svc = RedactionService(adapter)
+        got = svc.update_redaction_group("test_key", (255, 0, 0), "[X]")
+        assert got == 3
+        adapter.update_redaction_group.assert_called_once_with("test_key", (255, 0, 0), "[X]")
+
+    def test_remove_redaction_group_delegates(self) -> None:
+        """Positive: service.remove_redaction_group delegates."""
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.remove_redaction_group.return_value = 2
+        svc = RedactionService(adapter)
+        got = svc.remove_redaction_group("test_key")
+        assert got == 2
+        adapter.remove_redaction_group.assert_called_once_with("test_key")
+
+    def test_update_pending_matching_defaults_delegates(self) -> None:
+        """Positive: service.update_pending_matching_defaults delegates."""
+        adapter = MagicMock(spec=PyMuPDFAdapter)
+        adapter.update_pending_matching_defaults.return_value = 5
+        svc = RedactionService(adapter)
+        got = svc.update_pending_matching_defaults(
+            current_defaults=((0, 0, 0), None),
+            new_defaults=((255, 0, 0), "[NEW]"),
+        )
+        assert got == 5
+        adapter.update_pending_matching_defaults.assert_called_once_with(
+            ((0, 0, 0), None), ((255, 0, 0), "[NEW]")
+        )
