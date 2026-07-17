@@ -104,6 +104,9 @@ class PageView(QGraphicsView):
     # PR 12.1: emitted on "Redact Selection" context menu click.
     # Payload: (page_index, list of Word objects).
     redact_selection_requested = Signal(int, list)
+    # PR 12.5: emitted on "Remove This Mark" context menu click.
+    # Payload: (page_index, redaction_index_on_that_page).
+    remove_mark_requested = Signal(int, int)
 
     def __init__(
         self,
@@ -629,6 +632,17 @@ class PageView(QGraphicsView):
         redact_action = menu.addAction("Redact &Selection")
         redact_action.setEnabled(has_selection)
         redact_action.triggered.connect(self._on_redact_selection)
+
+        # PR 12.5: hit-test the click position against pending redaction
+        # marks on the current page. If we hit one, offer Remove This Mark.
+        hit = self._hit_test_redaction(self.mapToScene(event.pos()))
+        if hit is not None:
+            menu.addSeparator()
+            remove_action = menu.addAction("Remove This &Mark")
+            page_index, redaction_index = hit
+            remove_action.triggered.connect(
+                lambda: self.remove_mark_requested.emit(page_index, redaction_index)
+            )
         menu.exec(event.globalPos())
 
     def _on_redact_selection(self) -> None:
@@ -636,6 +650,43 @@ class PageView(QGraphicsView):
         if not self._selected_words:
             return
         self.redact_selection_requested.emit(self._current_page, list(self._selected_words))
+
+    def _hit_test_redaction(self, scene_pos) -> tuple[int, int] | None:
+        """PR 12.5: return (page_index, redaction_index) if scene_pos hits
+        a pending redaction on the current page, else None.
+
+        Scene coordinates are converted to page-space by dividing by
+        ``_RENDER_SCALE`` (same convention as ``_commit_redaction_drag``).
+        Overlapping marks return the last-added match (topmost visually).
+        Only single-page mode is supported -- matches the mode gate on
+        the redaction drag interaction.
+        """
+        adapter = self._page_cache.adapter
+        if adapter is None or self._page_count == 0:
+            return None
+        if self._view_mode != ViewMode.SINGLE_PAGE:
+            return None
+        # Page-space point
+        px = scene_pos.x() / _RENDER_SCALE
+        py = scene_pos.y() / _RENDER_SCALE
+        # Walk pending marks on the current page
+        try:
+            all_marks = adapter.list_redactions()
+        except Exception:
+            return None
+        # Filter to current page + assign 0-based per-page indices
+        page_marks: list[tuple[int, tuple[float, float, float, float]]] = []
+        for r in all_marks:
+            if r.page_index != self._current_page:
+                continue
+            page_marks.append((len(page_marks), r.rect))
+        if not page_marks:
+            return None
+        # Reverse-iterate to prefer the last-added mark on overlap.
+        for local_index, (x0, y0, x1, y1) in reversed(page_marks):
+            if x0 <= px <= x1 and y0 <= py <= y1:
+                return (self._current_page, local_index)
+        return None
 
     def _current_pixmap_item(self) -> QGraphicsPixmapItem | None:
         if not self._pixmap_items:

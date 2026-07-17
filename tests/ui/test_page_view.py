@@ -734,3 +734,93 @@ class TestRedactSelectionSlot:
     def test_signal_exists(self, page_view: PageView) -> None:
         """Positive: redact_selection_requested signal is defined on class."""
         assert hasattr(page_view, "redact_selection_requested")
+
+
+# ---- PR 12.5: right-click Remove This Mark ------------------------------
+
+
+class TestHitTestRedaction:
+    """PR 12.5: _hit_test_redaction returns (page_index, index) or None."""
+
+    def test_point_inside_mark_returns_hit(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: scene point inside a pending mark returns (page, index)."""
+        from PySide6.QtCore import QPointF
+
+        from pdfprism.core.types import Redaction
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view._current_page = 0
+
+        # Add a redaction in page space; scene = page * _RENDER_SCALE
+        adapter_with_doc.add_redaction(Redaction(page_index=0, rect=(50.0, 50.0, 100.0, 80.0)))
+        # Scene coords: use midpoint of the rect * 2 (scale)
+        from pdfprism.ui.widgets.page_view import _RENDER_SCALE
+
+        scene = QPointF(75.0 * _RENDER_SCALE, 65.0 * _RENDER_SCALE)
+        got = page_view._hit_test_redaction(scene)
+        assert got == (0, 0)
+
+    def test_point_outside_marks_returns_none(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: scene point not inside any mark returns None."""
+        from PySide6.QtCore import QPointF
+
+        from pdfprism.core.types import Redaction
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view._current_page = 0
+
+        adapter_with_doc.add_redaction(Redaction(page_index=0, rect=(50.0, 50.0, 100.0, 80.0)))
+        # Far outside
+        got = page_view._hit_test_redaction(QPointF(1000.0, 1000.0))
+        assert got is None
+
+    def test_overlapping_marks_returns_last_added(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: two marks overlap -> the last-added one wins."""
+        from PySide6.QtCore import QPointF
+
+        from pdfprism.core.types import Redaction
+
+        page_view.set_adapter(adapter_with_doc)
+        page_view._current_page = 0
+
+        # Two overlapping marks
+        adapter_with_doc.add_redaction(Redaction(page_index=0, rect=(0.0, 0.0, 100.0, 100.0)))
+        adapter_with_doc.add_redaction(Redaction(page_index=0, rect=(50.0, 50.0, 150.0, 150.0)))
+
+        from pdfprism.ui.widgets.page_view import _RENDER_SCALE
+
+        # Point (75, 75) hits both -> should return index 1 (last added)
+        scene = QPointF(75.0 * _RENDER_SCALE, 75.0 * _RENDER_SCALE)
+        got = page_view._hit_test_redaction(scene)
+        assert got == (0, 1)
+
+    def test_no_adapter_returns_none(self, page_view: PageView) -> None:
+        """Positive: no adapter bound -> None (defensive)."""
+        from PySide6.QtCore import QPointF
+
+        got = page_view._hit_test_redaction(QPointF(50.0, 50.0))
+        assert got is None
+
+
+class TestRemoveMarkSignal:
+    """PR 12.5: remove_mark_requested signal is emitted with correct args."""
+
+    def test_signal_exists(self, page_view: PageView) -> None:
+        """Positive: signal is defined on class."""
+        assert hasattr(page_view, "remove_mark_requested")
+
+    def test_signal_emits_correct_args(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: emit fires with (page_index, redaction_index)."""
+        page_view.set_adapter(adapter_with_doc)
+        received: list = []
+        page_view.remove_mark_requested.connect(lambda p, i: received.append((p, i)))
+        page_view.remove_mark_requested.emit(0, 3)
+        assert received == [(0, 3)]

@@ -87,6 +87,10 @@ class DocumentView(QWidget):
         # Payload: (page_index, list of Word objects).
         self._page_view.redact_selection_requested.connect(self._on_redact_selection_requested)
 
+        # PR 12.5: right-click on a pending mark -> Remove This Mark.
+        # Payload: (page_index, redaction_index_on_that_page).
+        self._page_view.remove_mark_requested.connect(self._on_remove_mark_requested)
+
         # PR 12.3: session-level redaction defaults; MainWindow keeps
         # these in sync via ``set_redaction_options`` after the Options
         # dialog is accepted or on app startup from QSettings.
@@ -504,3 +508,24 @@ class DocumentView(QWidget):
         """PR 12.3: apply session-level redaction defaults from MainWindow."""
         self._redaction_fill_color = fill_color
         self._redaction_replacement_text = replacement_text
+
+    def _on_remove_mark_requested(self, page_index: int, redaction_index: int) -> None:
+        """PR 12.5: remove a specific pending redaction annotation.
+
+        Called by PageView after the user right-clicks on a pending
+        mark and picks "Remove This Mark". Delegates to the adapter,
+        marks the tab dirty, and re-renders so the removed mark
+        disappears from view.
+        """
+        try:
+            self._adapter.remove_redaction(page_index, redaction_index)
+        except Exception:
+            # Adapter raises PageOutOfRangeError or IndexError if the
+            # mark was already removed / doc state changed between
+            # hit-test and slot execution. Silently ignore -- no
+            # user-visible dialog for a benign race.
+            return
+        self._refresh_modified()
+        self._page_cache.clear()
+        self._page_view.set_adapter(self._adapter)
+        self._thumbnail_panel.set_adapter(self._adapter)

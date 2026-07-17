@@ -476,3 +476,63 @@ class TestRedactSelectionSlot:
             0, [Word(text="x", x0=0.0, y0=0.0, x1=10.0, y1=10.0)]
         )
         assert cleared == [True]
+
+
+class TestRemoveMarkSlot:
+    """PR 12.5: _on_remove_mark_requested delegates to adapter."""
+
+    def test_delegates_to_adapter(self, mutable_view: DocumentView, monkeypatch) -> None:
+        """Positive: slot calls adapter.remove_redaction with args."""
+        remove_calls: list = []
+        monkeypatch.setattr(
+            mutable_view._adapter,
+            "remove_redaction",
+            lambda p, i: remove_calls.append((p, i)),
+        )
+        mutable_view._on_remove_mark_requested(2, 4)
+        assert remove_calls == [(2, 4)]
+
+    def test_rebinds_panels(self, mutable_view: DocumentView, monkeypatch) -> None:
+        """Positive: slot rebinds page_view + thumbnail_panel after removal."""
+        page_view_binds: list = []
+        thumbnail_binds: list = []
+        cache_clears: list = []
+        monkeypatch.setattr(mutable_view._adapter, "remove_redaction", lambda p, i: None)
+        monkeypatch.setattr(
+            mutable_view._page_view,
+            "set_adapter",
+            lambda a: page_view_binds.append(a),
+        )
+        monkeypatch.setattr(
+            mutable_view._thumbnail_panel,
+            "set_adapter",
+            lambda a: thumbnail_binds.append(a),
+        )
+        monkeypatch.setattr(
+            mutable_view._page_cache,
+            "clear",
+            lambda: cache_clears.append(True),
+        )
+        mutable_view._on_remove_mark_requested(0, 0)
+        assert cache_clears == [True]
+        assert len(page_view_binds) == 1
+        assert len(thumbnail_binds) == 1
+
+    def test_adapter_error_is_silent(self, mutable_view: DocumentView, monkeypatch) -> None:
+        """Positive: adapter raises (race with concurrent removal) -> silent no-op."""
+        from pdfprism.core.exceptions import PageOutOfRangeError
+
+        def _raise(p, i):
+            raise PageOutOfRangeError("stale index")
+
+        monkeypatch.setattr(mutable_view._adapter, "remove_redaction", _raise)
+        # Also verify no rebind occurred (defensive)
+        page_view_binds: list = []
+        monkeypatch.setattr(
+            mutable_view._page_view,
+            "set_adapter",
+            lambda a: page_view_binds.append(a),
+        )
+        # Must not raise
+        mutable_view._on_remove_mark_requested(999, 0)
+        assert page_view_binds == []
