@@ -6,7 +6,7 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 ## Status
 
-Under active development. Milestones 1–3 and PR 10, PR 10.5, PR 11, PR 12 (plus PR 12.1, 12.2, 12.3) shipped; PR 13 (OCR) is next and closes Milestone 4. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
+Under active development. Milestones 1–4 shipped, including the full redaction bundle (PR 12 plus PR 12.1–12.5). Milestone 5 (per-mark redaction customization) and Milestone 7 (packaging as standalone Windows app) are the next active tracks. OCR is on the backlog rather than the roadmap. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
 
 **What works today (through PR 12):**
 
