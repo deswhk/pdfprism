@@ -1429,6 +1429,8 @@ save separately after would be a UX trap).
 
 **PR 12.3: redaction options.** PR 12.3 adds session-level customization of redaction defaults via a new ``Redaction → Options...`` menu. The dialog exposes three controls: (a) fill color (RGB, default black; picker uses QColorDialog), (b) replacement text (optional overlay text drawn in the redacted area after apply -- e.g. "[REDACTED]"), and (c) apply behavior mapping to PyMuPDF's ``apply_redactions(images, graphics, text)`` kwargs. Session defaults are persisted via ``QSettings`` (consistent with tool mode persistence from Milestone 3) so they survive app restart. MainWindow propagates session values to every open ``DocumentView`` via ``set_redaction_options`` on tab open and after the Options dialog is accepted; DocumentView constructs ``RedactionService`` with the values when routing drag / text-select / search redactions.
 
+**PR 12.4: save-as before apply.** PR 12.4 upgrades the ``Redaction → Apply Redactions...`` confirmation from a Yes/No dialog to a three-button choice: **Apply and Save As...** | **Apply to Original** | **Cancel** (Cancel focused by default). "Apply and Save As..." copies the current in-memory document state (including any pending annotations) to a user-chosen path, opens the copy in a new tab, applies redactions there, and saves — the original file is not modified during this operation. "Apply to Original" preserves the existing behavior. Cancel is a no-op. The three-button dialog protects against irreversible destruction: users worried about over-redaction can pick Save As, verify the copy, and iterate without touching the source. Note: if the user previously saved pending annotations on the original file, those annotations remain in the original as unapplied marks after Save As (Save As does not modify the original file even for pre-existing marks).
+
 **Deferred (M5).** PR 12 ships the
 foundation: rectangle-drag drawing on visible pages. Text-selection
 redaction (right-click selected text → Redact) is PR 12.1;
@@ -1529,7 +1531,7 @@ work.
 - PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
 - PR 10.5: Set / change / remove passwords on save; CryptDialog (**shipped**).
 - PR 11: Metadata sanitization (**shipped**). PR 11.5 (deferred): permissions dialog with dual passwords.
-- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact, **shipped**). PR 12.2 (search-then-redact, **shipped**). PR 12.3 (redaction options, **shipped**).
+- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact, **shipped**). PR 12.2 (search-then-redact, **shipped**). PR 12.3 (redaction options, **shipped**). PR 12.4 (save-as before apply, **shipped**).
 - PR 13: OCR via Tesseract.
 
 

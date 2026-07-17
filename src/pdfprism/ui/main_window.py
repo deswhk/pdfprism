@@ -1462,7 +1462,7 @@ class MainWindow(QMainWindow):
         tab._refresh_modified()
 
     def _on_redaction_apply(self) -> None:
-        """Apply all pending redactions on the active tab (destructive)."""
+        """PR 12.4: three-button apply flow -- Save As, Apply to Original, or Cancel."""
         tab = self._active_tab
         if tab is None:
             return
@@ -1480,21 +1480,42 @@ class MainWindow(QMainWindow):
                 "There are no pending redaction marks to apply.",
             )
             return
-        # Confirmation dialog with count.
+
+        # Three-button confirmation dialog.
         page_count = len({r.page_index for r in pending})
-        msg = (
+        box = QMessageBox(self)
+        box.setWindowTitle("Apply Redactions")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
             f"This will permanently redact {len(pending)} region(s) "
-            f"across {page_count} page(s). This cannot be undone. Continue?"
+            f"across {page_count} page(s). This cannot be undone."
         )
-        reply = QMessageBox.question(
-            self,
-            "Apply Redactions",
-            msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+        box.setInformativeText(
+            "Apply and Save As... copies the document to a new file, applies "
+            "redactions on the copy, and opens the copy in a new tab. Your "
+            "original file is not modified during this operation.\n\n"
+            "Apply to Original applies redactions destructively to the current "
+            "file and saves."
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        save_as_button = box.addButton("Apply and Save As...", QMessageBox.ButtonRole.AcceptRole)
+        original_button = box.addButton("Apply to Original", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        clicked = box.clickedButton()
+
+        if clicked is cancel_button:
             return
+        if clicked is original_button:
+            self._apply_redactions_to_original(tab, service)
+            return
+        if clicked is save_as_button:
+            self._apply_redactions_and_save_as(tab, adapter, service)
+            return
+
+    def _apply_redactions_to_original(self, tab, service) -> None:
+        """Destructive apply on the current file (auto-save)."""
+        adapter = tab._adapter
         try:
             count = service.apply(
                 images=self._redaction_images,
@@ -1511,6 +1532,68 @@ class MainWindow(QMainWindow):
         tab._page_view.set_adapter(adapter)
         tab._thumbnail_panel.set_adapter(adapter)
         self.statusBar().showMessage(f"Applied {count} redaction(s)", 3000)
+
+    def _apply_redactions_and_save_as(self, tab, adapter, service) -> None:
+        """PR 12.4: save current state to new file, apply on copy, open new tab."""
+        # Compute suggested filename: <stem>_redacted.pdf next to original
+        source_path = tab.path
+        if source_path is None:
+            QMessageBox.critical(self, "Cannot save", "The current document has no file path.")
+            return
+        suggested = source_path.parent / f"{source_path.stem}_redacted.pdf"
+        chosen_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Redacted Copy As...",
+            str(suggested),
+            "PDF files (*.pdf)",
+        )
+        if not chosen_str:
+            # User cancelled the file dialog -- full abort, marks preserved.
+            return
+        new_path = Path(chosen_str)
+        try:
+            # Save current in-memory state (including pending annotations) to
+            # the new path. This preserves whatever the user already saved on
+            # the original -- we're not touching it.
+            adapter.save(path=new_path)
+        except PdfPrismError as exc:
+            QMessageBox.critical(self, "Failed to save copy", str(exc))
+            return
+
+        # Open the new file in a new tab.
+        self._open_path(new_path)
+        new_tab = self._active_tab
+        if new_tab is None or new_tab is tab:
+            # _open_path failed or unexpectedly kept the original tab active.
+            QMessageBox.critical(
+                self,
+                "Failed to open copy",
+                "The redacted copy was saved but could not be opened.",
+            )
+            return
+
+        # Apply redactions on the new tab's adapter.
+        new_adapter = new_tab._adapter
+        new_service = RedactionService(
+            new_adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        )
+        try:
+            count = new_service.apply(
+                images=self._redaction_images,
+                graphics=self._redaction_graphics,
+                text=self._redaction_text,
+            )
+            new_adapter.save()
+        except PdfPrismError as exc:
+            QMessageBox.critical(self, "Failed to apply redactions on copy", str(exc))
+            return
+        new_tab._refresh_modified()
+        new_tab._page_cache.clear()
+        new_tab._page_view.set_adapter(new_adapter)
+        new_tab._thumbnail_panel.set_adapter(new_adapter)
+        self.statusBar().showMessage(f"Applied {count} redaction(s) to {new_path.name}", 3000)
 
     def _on_redaction_clear(self) -> None:
         """Remove all pending redaction marks without applying."""
