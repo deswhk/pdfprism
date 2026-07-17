@@ -179,3 +179,41 @@ class Redaction:
     rect: tuple[float, float, float, float]  # (x0, y0, x1, y1) in PDF points
     replacement_text: str | None = None
     fill_color: tuple[int, int, int] = (0, 0, 0)  # RGB 0-255; default black
+
+
+@dataclass(frozen=True)
+class RedactionGroup:
+    """A group of pending redaction marks with matching extracted text (PR 14a).
+
+    Groups are the natural unit of user interaction with pending redactions:
+    all marks with the same normalized extracted text belong to one group,
+    and share the same styling (fill_color, replacement_text) by design.
+
+    ``text`` is the display form of the extracted text (first-seen
+    capitalization). ``normalized_text`` is the case-insensitive,
+    whitespace-collapsed form used for group identity.
+
+    ``is_customized`` is computed at construction time by comparing the
+    group's fill/text to the current Session Global values passed in by
+    the caller. It reflects the view-time state, not persistent flags:
+    a group is Custom if its styling differs from Session Global, Global
+    if it matches. Session Global values are managed by MainWindow and
+    passed through when computing groups.
+
+    Marks with empty extracted text (image regions, whitespace-only rects)
+    are treated as singletons with a synthetic identifier of the form
+    ``(image region, page N)``.
+    """
+
+    text: str
+    normalized_text: str
+    marks: list[Redaction]
+    is_customized: bool
+
+    @property
+    def count(self) -> int:
+        return len(self.marks)
+
+    @property
+    def page_indices(self) -> list[int]:
+        return sorted({m.page_index for m in self.marks})

@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
-from pdfprism.core.types import Redaction
+from pdfprism.core.types import Redaction, RedactionGroup
 
 logger = logging.getLogger(__name__)
 
@@ -157,3 +157,61 @@ class RedactionService:
         count = self._adapter.apply_redactions(images=images, graphics=graphics, text=text)
         logger.info("Redactions applied: %d", count)
         return count
+
+    def list_redactions_grouped(
+        self,
+        session_fill: tuple[int, int, int] = (0, 0, 0),
+        session_text: str | None = None,
+    ) -> list[RedactionGroup]:
+        """PR 14a: return pending redactions grouped by normalized extracted text.
+
+        Delegates to the adapter. See
+        ``PyMuPDFAdapter.list_redactions_grouped`` for details on
+        grouping semantics and ``is_customized`` computation.
+        """
+        return self._adapter.list_redactions_grouped(
+            session_fill=session_fill,
+            session_text=session_text,
+        )
+
+    def update_redaction_group(
+        self,
+        text_query: str,
+        fill_color: tuple[int, int, int],
+        replacement_text: str | None,
+    ) -> int:
+        """PR 14a: update fill/text on all marks in a group.
+
+        Delegates to the adapter. See
+        ``PyMuPDFAdapter.update_redaction_group``.
+        """
+        count = self._adapter.update_redaction_group(text_query, fill_color, replacement_text)
+        logger.info("Updated %d mark(s) in group %r", count, text_query)
+        return count
+
+    def remove_redaction_group(self, text_query: str) -> int:
+        """PR 14a: remove all pending marks in a group.
+
+        Delegates to the adapter.
+        """
+        count = self._adapter.remove_redaction_group(text_query)
+        logger.info("Removed %d mark(s) from group %r", count, text_query)
+        return count
+
+    def update_pending_matching_defaults(
+        self,
+        current_defaults: tuple[tuple[int, int, int], str | None],
+        new_defaults: tuple[tuple[int, int, int], str | None],
+    ) -> int:
+        """PR 14a: restyle marks whose fill+text match current defaults.
+
+        Delegates to the adapter. Typically called by MainWindow when
+        session defaults change via the Options dialog.
+        """
+        count = self._adapter.update_pending_matching_defaults(current_defaults, new_defaults)
+        logger.info("Restyled %d pending mark(s) matching old session defaults", count)
+        return count
+
+    def get_text_in_rect(self, page_index: int, rect: tuple[float, float, float, float]) -> str:
+        """PR 14a: extract text within a rectangle on a page (delegates to adapter)."""
+        return self._adapter.get_text_in_rect(page_index, rect)

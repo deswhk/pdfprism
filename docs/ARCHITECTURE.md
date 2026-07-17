@@ -1433,6 +1433,8 @@ save separately after would be a UX trap).
 
 **PR 12.5: remove individual pending marks.** PR 12.5 adds selective mark removal via right-click. Users can now right-click on any pending redaction annotation and pick "Remove This Mark" from the context menu to delete just that one mark (adjacent to Copy / Extract / Redact Selection). Previously the only option was ``Redaction → Clear All Pending`` -- an all-or-nothing wipe. PageView gains ``_hit_test_redaction(scene_pos)`` which converts scene coords to page-space and walks pending marks on the current page in reverse insertion order (topmost overlapping mark wins). Signal shape mirrors the rest of the redaction bundle: PageView emits ``remove_mark_requested(page_index, redaction_index)``; DocumentView routes through the existing ``adapter.remove_redaction`` method. Adapter errors (e.g. stale index if the mark was concurrently removed) are silently absorbed -- no user-visible dialog for a benign race.
 
+**PR 14a: per-mark customization foundation.** PR 14a lays the groundwork for Milestone 5 by adding group-based primitives to the adapter and service layer. A ``RedactionGroup`` dataclass represents a set of pending marks sharing the same normalized extracted text; ``list_redactions_grouped`` groups pending redactions by text at view time and computes ``is_customized`` per group by comparing to session defaults. Mutation primitives include ``update_redaction_group``, ``remove_redaction_group``, and ``update_pending_matching_defaults`` (called by MainWindow when Options change, restyles all marks matching the OLD session defaults to the NEW). Two nuances worth noting: (1) grouping keys are normalized extracted text (case-insensitive, whitespace-collapsed) not styling, so adding style attributes later never affects group identity; (2) PyMuPDF stores redact ``OverlayText`` in a field not exposed via ``annot.info``, so the adapter mirrors replacement_text into ``annot.info["content"]`` at add time and uses delete+recreate (rather than in-place edit) to update text on existing marks. Neither is_customized nor extracted_text is persisted; both are computed at view time from the annotation's actual stored fill/text values. Marks visually render with PyMuPDF's stylized red-outline appearance regardless of stored fill color -- fill/text only becomes visually observable at apply time. This matches Adobe Acrobat's convention.
+
 **Deferred (M5).** PR 12 ships the
 foundation: rectangle-drag drawing on visible pages. Text-selection
 redaction (right-click selected text → Redact) is PR 12.1;
@@ -1542,7 +1544,7 @@ work.
 
 Per-mark inspector: different fill color and replacement text per individual pending redaction annotation. PR 12.3 delivered session-level defaults; PR 14 would let power users override the defaults on a mark-by-mark basis (e.g. black rectangles for names, striped patterns for account numbers, "[SSN]" replacement text on tax IDs). Requires UX design work — likely a per-mark inspector panel that appears when a mark is selected, with fields mirroring the Options dialog. Sub-step split (PR 14a: inspector panel + selection state; PR 14b: session-defaults override) to be decided during design Q&A.
 
-- PR 14: Per-mark inspector and override.
+- PR 14a (foundation, **shipped**): adapter grouping + session-defaults restyle on Options change. PR 14b (right-click Edit/Remove Group) and PR 14c (Manage Marks dialog) planned.
 
 ### Milestone 6 — Advanced editing (planned)
 
