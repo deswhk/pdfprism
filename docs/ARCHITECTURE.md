@@ -1528,22 +1528,46 @@ work.
   matching ``ThumbnailPanel`` and ``OutlinePanel``. Crop preview
   and multi-select crop/extract deferred to PR 9.5.
 
-### Milestone 4 — Security & OCR
+### Milestone 4 — Security & Redaction (complete)
 
 - PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
 - PR 10.5: Set / change / remove passwords on save; CryptDialog (**shipped**).
 - PR 11: Metadata sanitization (**shipped**). PR 11.5 (deferred): permissions dialog with dual passwords.
 - PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact, **shipped**). PR 12.2 (search-then-redact, **shipped**). PR 12.3 (redaction options, **shipped**). PR 12.4 (save-as before apply, **shipped**). PR 12.5 (remove individual marks, **shipped**).
-- PR 13: OCR via Tesseract.
 
 
 **PR 11.5 (deferred): Permissions dialog.** After PR 11 dropped permissions from scope (PyMuPDF's ``permissions=`` save kwarg only takes effect when user_pw and owner_pw are distinct -- otherwise the reader authenticates as owner and all restrictions are silently overridden; enforcement is honor-system anyway, not cryptographic), permissions is deferred. If a concrete user requirement emerges, PR 11.5 would add an Adobe-style dual-password dialog with an explicit owner-password field, an explanation of the honor-system caveat, and grouped permission checkboxes. Reference design: Adobe Acrobat's File → Properties → Security tab.
 
-### Milestone 5 — Advanced
+### Milestone 5 — Per-mark redaction customization (planned)
 
-- PR 13: Compression and linearization.
-- PR 14: Combine PDFs + images + .txt into one PDF.
-- PR 15: Visual diff between two PDFs.
+Per-mark inspector: different fill color and replacement text per individual pending redaction annotation. PR 12.3 delivered session-level defaults; PR 14 would let power users override the defaults on a mark-by-mark basis (e.g. black rectangles for names, striped patterns for account numbers, "[SSN]" replacement text on tax IDs). Requires UX design work — likely a per-mark inspector panel that appears when a mark is selected, with fields mirroring the Options dialog. Sub-step split (PR 14a: inspector panel + selection state; PR 14b: session-defaults override) to be decided during design Q&A.
+
+- PR 14: Per-mark inspector and override.
+
+### Milestone 6 — Advanced editing (planned)
+
+- PR 15: Compression and linearization.
+- PR 16: Combine PDFs + images + .txt into one PDF.
+- PR 17: Visual diff between two PDFs.
+
+### Milestone 7 — Packaging (planned)
+
+Package pdfprism as a standalone Windows application. Cost estimate: installer ~150-200 MB (Python runtime + PySide6 Qt + MuPDF binary), installed size ~250-350 MB. Comparable to mid-tier commercial PDF apps (Adobe Reader ~300 MB, Foxit ~200 MB).
+
+- PR 18: PyInstaller bundle + Inno Setup installer + SignPath.io code signing.
+
+Sub-step split (PR 18a: PyInstaller bundle + startup validation; PR 18b: Inno Setup installer; PR 18c: SignPath.io signing) to be decided during design Q&A. Auto-updater deferred to backlog.
+
+## Backlog
+
+Deferred items with no current schedule. Each is a real feature that could ship if a concrete user requirement emerges; each is out until then.
+
+- **PR 11.5: Permissions dialog with dual passwords.** Adobe-style owner/user password dialog with grouped permission checkboxes. Deferred because PyMuPDF's ``permissions=`` save kwarg silently no-ops when user_pw == owner_pw, and enforcement is honor-system anyway, not cryptographic. See the PR 11.5 deferred paragraph above for the full rationale.
+- **PR 13: OCR via Tesseract.** Would originally have closed Milestone 4. Skipped without concrete demand. Real users work primarily with born-digital PDFs; Tesseract on Windows is a support burden (path detection, language packs); the problem is well-solved by Adobe/ABBYY; threading + progress + cancel is real UI work with poor cost-per-value ratio. Cheap to add later if scanned PDFs become part of the actual use case.
+- **Rotated text (Quad) redaction UI.** PR 12 uses Quads internally but the redaction UI only supports axis-aligned rectangles. A follow-up would enable redacting rotated text (signatures, sideways table cells, watermark-style content). Adapter API already supports it; only UI work is needed.
+- **Match preview in Search-and-Redact dialog.** Clicking a match in the results list would scroll PageView to that location and highlight the match. Deferred in PR 12.2 due to modal-dialog + PageView coordination complexity. Would require a non-modal dialog or focus-out handling.
+- **Regex search.** Applies to both the Find bar and the Search-and-Redact dialog. Deferred in PR 12.2 to reduce error surface (bad regexes crash searches, unclear error UX). Users who need regex can search externally and use text-selection redaction.
+- **Cross-tab search UI.** ``SearchService.find_all_across()`` exists as an API but no UI currently wires to it. Would enable searching across every open tab from a single Find bar invocation, with results dock listing hits by tab.
 
 ## Intentionally Out of Scope (v1)
 
