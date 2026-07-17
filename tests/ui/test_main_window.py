@@ -2393,16 +2393,10 @@ class TestRedactionApplySlot:
         monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
         monkeypatch.setattr(adapter, "save", lambda *a, **kw: save_calls.append(True))
 
-        # Auto-confirm Yes
-        from PySide6.QtWidgets import QMessageBox
-
-        monkeypatch.setattr(
-            QMessageBox,
-            "question",
-            lambda *a, **kw: QMessageBox.StandardButton.Yes,
-        )
-
-        main_window._on_redaction_apply()
+        # PR 12.4: dialog rewritten. Call the "apply to original" helper
+        # directly to bypass the three-button confirmation dialog.
+        service = mw_mod.RedactionService(adapter)
+        main_window._apply_redactions_to_original(tab, service)
         assert apply_calls == [True]
         assert save_calls == [True]
 
@@ -2433,13 +2427,12 @@ class TestRedactionApplySlot:
 
         monkeypatch.setattr(mw_mod, "RedactionService", _SpyService)
 
+        # PR 12.4: dialog rewritten. Intercept QMessageBox.exec so no
+        # button is selected -> clickedButton returns None -> our code
+        # falls through without calling either helper (equivalent to Cancel).
         from PySide6.QtWidgets import QMessageBox
 
-        monkeypatch.setattr(
-            QMessageBox,
-            "question",
-            lambda *a, **kw: QMessageBox.StandardButton.No,
-        )
+        monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
 
         main_window._on_redaction_apply()
         assert apply_calls == []
@@ -2504,17 +2497,16 @@ class TestRedactionApplySlot:
 
         monkeypatch.setattr(mw_mod, "RedactionService", _RaisingService)
 
+        # PR 12.4: intercept QMessageBox.critical from helper directly.
         from PySide6.QtWidgets import QMessageBox
 
-        monkeypatch.setattr(
-            QMessageBox,
-            "question",
-            lambda *a, **kw: QMessageBox.StandardButton.Yes,
-        )
         crit_calls: list = []
         monkeypatch.setattr(QMessageBox, "critical", lambda *a, **kw: crit_calls.append(True))
 
-        main_window._on_redaction_apply()
+        # Call the "apply to original" helper directly, bypassing the dialog.
+        tab = main_window._active_tab
+        service = _RaisingService(tab._adapter)
+        main_window._apply_redactions_to_original(tab, service)
         assert crit_calls == [True]
 
     def test_no_active_tab_is_noop(self, main_window: MainWindow, monkeypatch) -> None:
@@ -2821,3 +2813,220 @@ class TestRedactionOptionsSlot:
 
         main_window._on_redaction_options()
         assert main_window._redaction_fill_color == original_color
+
+
+# ---- PR 12.4: Apply Save-As flow -----------------------------------
+
+
+class TestApplySaveAsCancel:
+    """Confirmation dialog: Cancel button dismisses without action."""
+
+    def test_cancel_dismisses(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: no click on any button -> neither helper invoked."""
+        from PySide6.QtWidgets import QMessageBox
+
+        from pdfprism.core.types import Redaction
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(sample_pdf_path)
+        pending = [Redaction(page_index=0, rect=(10.0, 10.0, 100.0, 30.0))]
+
+        class _StubService:
+            def __init__(self, a, **kwargs):
+                pass
+
+            def list_redactions(self):
+                return pending
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _StubService)
+
+        # QMessageBox.exec returns without clicking anything -> clickedButton = None
+        monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+
+        # Spy on both helpers -- neither should be called
+        to_original_calls: list = []
+        save_as_calls: list = []
+        monkeypatch.setattr(
+            main_window,
+            "_apply_redactions_to_original",
+            lambda *a, **kw: to_original_calls.append(True),
+        )
+        monkeypatch.setattr(
+            main_window,
+            "_apply_redactions_and_save_as",
+            lambda *a, **kw: save_as_calls.append(True),
+        )
+
+        main_window._on_redaction_apply()
+        assert to_original_calls == []
+        assert save_as_calls == []
+
+
+class TestApplyAndSaveAsHelper:
+    """_apply_redactions_and_save_as flow."""
+
+    def test_happy_path(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: save copy, open new tab, apply, save."""
+        from PySide6.QtWidgets import QFileDialog
+
+        from pdfprism.ui import main_window as mw_mod
+
+        main_window._open_path(mutable_pdf_path)
+        original_tab = main_window._active_tab
+        original_adapter = original_tab._adapter
+
+        new_path = tmp_path / "smoke_saveas_copy.pdf"
+
+        # Auto-select the new path in QFileDialog
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: (str(new_path), "PDF files (*.pdf)"),
+        )
+
+        # Spy on adapter.save at source (which does the copy)
+        original_save_calls: list = []
+        real_save = original_adapter.save
+
+        def spy_save(path=None, **kw):
+            original_save_calls.append(path)
+            return real_save(path=path, **kw)
+
+        monkeypatch.setattr(original_adapter, "save", spy_save)
+
+        # Fake service (works on any adapter)
+        apply_calls: list = []
+
+        class _StubService:
+            def __init__(self, a, **kwargs):
+                self.adapter = a
+
+            def list_redactions(self):
+                return []
+
+            def apply(self, **kwargs):
+                apply_calls.append(True)
+                return 1
+
+        monkeypatch.setattr(mw_mod, "RedactionService", _StubService)
+
+        service = _StubService(original_adapter)
+        main_window._apply_redactions_and_save_as(original_tab, original_adapter, service)
+
+        # source adapter should have been asked to save to new_path
+        assert new_path in original_save_calls
+        # apply was called (on the new tab's adapter)
+        assert apply_calls == [True]
+        # A new tab should be open
+        assert main_window._tab_widget.count() >= 2
+
+    def test_user_cancels_file_dialog(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: user cancels QFileDialog -> full abort, no side effects."""
+        from PySide6.QtWidgets import QFileDialog
+
+        main_window._open_path(mutable_pdf_path)
+        tab = main_window._active_tab
+        adapter = tab._adapter
+
+        # QFileDialog cancel returns empty string
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: ("", ""),
+        )
+
+        # Spy on adapter.save -- should NOT be called on cancel
+        save_calls: list = []
+        monkeypatch.setattr(adapter, "save", lambda *a, **kw: save_calls.append(True))
+
+        class _StubService:
+            def __init__(self, a, **kwargs):
+                pass
+
+        service = _StubService(adapter)
+        main_window._apply_redactions_and_save_as(tab, adapter, service)
+
+        assert save_calls == []
+        # Still only one tab
+        assert main_window._tab_widget.count() == 1
+
+    def test_source_save_error_shows_critical(
+        self,
+        main_window: MainWindow,
+        mutable_pdf_path: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: adapter.save() on source copy fails -> critical dialog."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        from pdfprism.core.exceptions import DocumentSaveError
+
+        main_window._open_path(mutable_pdf_path)
+        tab = main_window._active_tab
+        adapter = tab._adapter
+
+        new_path = tmp_path / "will_fail.pdf"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *a, **kw: (str(new_path), ""),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "save",
+            lambda *a, **kw: (_ for _ in ()).throw(DocumentSaveError("boom")),
+        )
+
+        crit_calls: list = []
+        monkeypatch.setattr(QMessageBox, "critical", lambda *a, **kw: crit_calls.append(True))
+
+        class _StubService:
+            def __init__(self, a, **kwargs):
+                pass
+
+        main_window._apply_redactions_and_save_as(tab, adapter, _StubService(adapter))
+        assert crit_calls == [True]
+
+    def test_no_path_shows_critical(
+        self,
+        main_window: MainWindow,
+        sample_pdf_path: Path,
+        monkeypatch,
+    ) -> None:
+        """Positive: tab.path is None -> critical dialog, no save attempt."""
+        from PySide6.QtWidgets import QMessageBox
+
+        main_window._open_path(sample_pdf_path)
+        tab = main_window._active_tab
+        adapter = tab._adapter
+
+        # Force tab.path to None -- simulates orphan tab
+        monkeypatch.setattr(type(tab), "path", property(lambda s: None))
+
+        crit_calls: list = []
+        monkeypatch.setattr(QMessageBox, "critical", lambda *a, **kw: crit_calls.append(True))
+
+        class _StubService:
+            def __init__(self, a, **kwargs):
+                pass
+
+        main_window._apply_redactions_and_save_as(tab, adapter, _StubService(adapter))
+        assert crit_calls == [True]
