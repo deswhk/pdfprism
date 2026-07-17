@@ -1431,6 +1431,8 @@ save separately after would be a UX trap).
 
 **PR 12.4: save-as before apply.** PR 12.4 upgrades the ``Redaction → Apply Redactions...`` confirmation from a Yes/No dialog to a three-button choice: **Apply and Save As...** | **Apply to Original** | **Cancel** (Cancel focused by default). "Apply and Save As..." copies the current in-memory document state (including any pending annotations) to a user-chosen path, opens the copy in a new tab, applies redactions there, and saves — the original file is not modified during this operation. "Apply to Original" preserves the existing behavior. Cancel is a no-op. The three-button dialog protects against irreversible destruction: users worried about over-redaction can pick Save As, verify the copy, and iterate without touching the source. Note: if the user previously saved pending annotations on the original file, those annotations remain in the original as unapplied marks after Save As (Save As does not modify the original file even for pre-existing marks).
 
+**PR 12.5: remove individual pending marks.** PR 12.5 adds selective mark removal via right-click. Users can now right-click on any pending redaction annotation and pick "Remove This Mark" from the context menu to delete just that one mark (adjacent to Copy / Extract / Redact Selection). Previously the only option was ``Redaction → Clear All Pending`` -- an all-or-nothing wipe. PageView gains ``_hit_test_redaction(scene_pos)`` which converts scene coords to page-space and walks pending marks on the current page in reverse insertion order (topmost overlapping mark wins). Signal shape mirrors the rest of the redaction bundle: PageView emits ``remove_mark_requested(page_index, redaction_index)``; DocumentView routes through the existing ``adapter.remove_redaction`` method. Adapter errors (e.g. stale index if the mark was concurrently removed) are silently absorbed -- no user-visible dialog for a benign race.
+
 **Deferred (M5).** PR 12 ships the
 foundation: rectangle-drag drawing on visible pages. Text-selection
 redaction (right-click selected text → Redact) is PR 12.1;
@@ -1531,7 +1533,7 @@ work.
 - PR 10: Encrypted PDFs — open with password prompt + retry loop (**shipped**).
 - PR 10.5: Set / change / remove passwords on save; CryptDialog (**shipped**).
 - PR 11: Metadata sanitization (**shipped**). PR 11.5 (deferred): permissions dialog with dual passwords.
-- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact, **shipped**). PR 12.2 (search-then-redact, **shipped**). PR 12.3 (redaction options, **shipped**). PR 12.4 (save-as before apply, **shipped**).
+- PR 12: Redaction (**shipped**). PR 12.1 (text-selection redact, **shipped**). PR 12.2 (search-then-redact, **shipped**). PR 12.3 (redaction options, **shipped**). PR 12.4 (save-as before apply, **shipped**). PR 12.5 (remove individual marks, **shipped**).
 - PR 13: OCR via Tesseract.
 
 
