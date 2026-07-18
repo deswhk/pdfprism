@@ -824,3 +824,41 @@ class TestRemoveMarkSignal:
         page_view.remove_mark_requested.connect(lambda p, i: received.append((p, i)))
         page_view.remove_mark_requested.emit(0, 3)
         assert received == [(0, 3)]
+
+
+# ---- PR 14b: edit_group_requested + adaptive menu ------------------
+
+
+class TestEditGroupRequestedSignal:
+    def test_signal_exists(self, page_view) -> None:
+        """Positive: edit_group_requested signal is defined."""
+        assert hasattr(page_view, "edit_group_requested")
+
+    def test_signal_emits_correct_args(self, page_view) -> None:
+        """Positive: emit fires with (page_index, redaction_index)."""
+        received: list = []
+        page_view.edit_group_requested.connect(lambda p, i: received.append((p, i)))
+        page_view.edit_group_requested.emit(1, 4)
+        assert received == [(1, 4)]
+
+
+class TestResolveGroupSizeForHit:
+    def test_singleton_returns_one(self, page_view, adapter_with_doc) -> None:
+        """Positive: group of 1 -> returns 1."""
+        from pdfprism.core.types import Redaction
+
+        page_view.set_adapter(adapter_with_doc)
+        adapter_with_doc.add_redaction(Redaction(page_index=0, rect=(10.0, 10.0, 200.0, 30.0)))
+        size = page_view._resolve_group_size_for_hit(0, 0)
+        assert size == 1
+
+    def test_no_adapter_returns_one(self, page_view) -> None:
+        """Positive: no adapter bound -> returns 1 defensively."""
+        size = page_view._resolve_group_size_for_hit(0, 0)
+        assert size == 1
+
+    def test_bad_index_returns_one(self, page_view, adapter_with_doc) -> None:
+        """Positive: stale/invalid redaction_index -> returns 1."""
+        page_view.set_adapter(adapter_with_doc)
+        size = page_view._resolve_group_size_for_hit(0, 999)
+        assert size == 1

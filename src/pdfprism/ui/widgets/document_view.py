@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 from pdfprism.core.adapters.pymupdf_adapter import PyMuPDFAdapter
 from pdfprism.core.types import SearchHit
 from pdfprism.services.search import SearchService
+from pdfprism.ui.dialogs.edit_group import EditGroupDialog
 from pdfprism.ui.page_cache import PageCache
 from pdfprism.ui.widgets.organize_panel import OrganizePagesPanel
 from pdfprism.ui.widgets.outline_panel import OutlinePanel
@@ -90,6 +91,10 @@ class DocumentView(QWidget):
         # PR 12.5: right-click on a pending mark -> Remove This Mark.
         # Payload: (page_index, redaction_index_on_that_page).
         self._page_view.remove_mark_requested.connect(self._on_remove_mark_requested)
+
+        # PR 14b: right-click on a pending mark -> Edit This Group.
+        # Payload: (page_index, redaction_index_on_that_page).
+        self._page_view.edit_group_requested.connect(self._on_edit_group_requested)
 
         # PR 12.3: session-level redaction defaults; MainWindow keeps
         # these in sync via ``set_redaction_options`` after the Options
@@ -510,20 +515,109 @@ class DocumentView(QWidget):
         self._redaction_replacement_text = replacement_text
 
     def _on_remove_mark_requested(self, page_index: int, redaction_index: int) -> None:
-        """PR 12.5: remove a specific pending redaction annotation.
+        """PR 12.5 (redefined by PR 14b): remove the group containing the mark.
 
         Called by PageView after the user right-clicks on a pending
-        mark and picks "Remove This Mark". Delegates to the adapter,
-        marks the tab dirty, and re-renders so the removed mark
-        disappears from view.
+        mark and picks "Remove This Mark" (singleton) or "Remove This
+        Group" (N marks). Resolves the mark to its group and deletes
+        every mark in it via ``remove_redaction_group``. Singletons
+        become a group of size 1, so semantics stay consistent for
+        both menu labels.
+        """
+        group = self._resolve_group_for_mark(page_index, redaction_index)
+        if group is None:
+            return
+        from pdfprism.services.redaction import RedactionService
+
+        service = RedactionService(
+            self._adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        )
+        try:
+            service.remove_redaction_group(group.normalized_text)
+        except Exception:
+            return
+        self._refresh_modified()
+        self._page_cache.clear()
+        self._page_view.set_adapter(self._adapter)
+        self._thumbnail_panel.set_adapter(self._adapter)
+
+    def _resolve_group_for_mark(self, page_index: int, redaction_index: int):
+        """PR 14b: find the RedactionGroup containing the target mark.
+
+        Returns None if the mark or its group can't be resolved (adapter
+        missing, stale index, etc.). Uses list_redactions() to identify
+        the target mark by (page_index, redaction_index), then walks
+        list_redactions_grouped() to find the group containing it by
+        matching (page_index, rect).
         """
         try:
-            self._adapter.remove_redaction(page_index, redaction_index)
+            all_pending = self._adapter.list_redactions()
         except Exception:
-            # Adapter raises PageOutOfRangeError or IndexError if the
-            # mark was already removed / doc state changed between
-            # hit-test and slot execution. Silently ignore -- no
-            # user-visible dialog for a benign race.
+            return None
+        page_marks = [m for m in all_pending if m.page_index == page_index]
+        if not (0 <= redaction_index < len(page_marks)):
+            return None
+        target = page_marks[redaction_index]
+        try:
+            groups = self._adapter.list_redactions_grouped(
+                session_fill=self._redaction_fill_color,
+                session_text=self._redaction_replacement_text,
+            )
+        except Exception:
+            return None
+        for g in groups:
+            for m in g.marks:
+                if m.page_index == target.page_index and m.rect == target.rect:
+                    return g
+        return None
+
+    def _on_edit_group_requested(self, page_index: int, redaction_index: int) -> None:
+        """PR 14b: open EditGroupDialog scoped to the mark's group.
+
+        Resolves the mark to its group, opens the dialog prefilled with
+        the group's current fill/text and customization state. On OK,
+        applies the new values via ``update_redaction_group``. If the
+        user clicked "Reset to Global", applies current session
+        defaults instead. Refreshes panels so any visual change lands.
+        """
+        group = self._resolve_group_for_mark(page_index, redaction_index)
+        if group is None:
+            return
+        # Prefill with the group's first mark's values (all marks in
+        # a group share styling by design).
+        first = group.marks[0]
+        dlg = EditGroupDialog(
+            group_display_text=group.text,
+            group_size=group.count,
+            is_customized=group.is_customized,
+            current_fill=first.fill_color,
+            current_text=first.replacement_text,
+            parent=self,
+        )
+        from PySide6.QtWidgets import QDialog
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Determine values to apply. If Reset was clicked, use session
+        # defaults; otherwise use the dialog's values.
+        if dlg.was_reset:
+            new_fill = self._redaction_fill_color
+            new_text = self._redaction_replacement_text
+        else:
+            new_fill = dlg.fill_color
+            new_text = dlg.replacement_text
+        from pdfprism.services.redaction import RedactionService
+
+        service = RedactionService(
+            self._adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        )
+        try:
+            service.update_redaction_group(group.normalized_text, new_fill, new_text)
+        except Exception:
             return
         self._refresh_modified()
         self._page_cache.clear()

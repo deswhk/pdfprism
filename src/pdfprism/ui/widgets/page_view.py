@@ -107,6 +107,10 @@ class PageView(QGraphicsView):
     # PR 12.5: emitted on "Remove This Mark" context menu click.
     # Payload: (page_index, redaction_index_on_that_page).
     remove_mark_requested = Signal(int, int)
+    # PR 14b: emitted on "Edit This Group" context menu click.
+    # Payload: (page_index, redaction_index_on_that_page).
+    # DocumentView slot resolves the mark's group and opens Edit dialog.
+    edit_group_requested = Signal(int, int)
 
     def __init__(
         self,
@@ -633,13 +637,26 @@ class PageView(QGraphicsView):
         redact_action.setEnabled(has_selection)
         redact_action.triggered.connect(self._on_redact_selection)
 
-        # PR 12.5: hit-test the click position against pending redaction
-        # marks on the current page. If we hit one, offer Remove This Mark.
+        # PR 12.5 (redefined by PR 14b): hit-test click position against
+        # pending redaction marks on the current page. If we hit one, offer
+        # Edit / Remove -- scoped to the mark's group. Menu labels adapt
+        # based on group size (singleton -> "This Mark", many -> "This Group").
         hit = self._hit_test_redaction(self.mapToScene(event.pos()))
         if hit is not None:
             menu.addSeparator()
-            remove_action = menu.addAction("Remove This &Mark")
             page_index, redaction_index = hit
+            group_size = self._resolve_group_size_for_hit(page_index, redaction_index)
+            if group_size <= 1:
+                edit_label = "&Edit This Mark..."
+                remove_label = "&Remove This Mark"
+            else:
+                edit_label = f"&Edit This Group... ({group_size} marks)"
+                remove_label = f"&Remove This Group ({group_size} marks)"
+            edit_action = menu.addAction(edit_label)
+            edit_action.triggered.connect(
+                lambda: self.edit_group_requested.emit(page_index, redaction_index)
+            )
+            remove_action = menu.addAction(remove_label)
             remove_action.triggered.connect(
                 lambda: self.remove_mark_requested.emit(page_index, redaction_index)
             )
@@ -687,6 +704,38 @@ class PageView(QGraphicsView):
             if x0 <= px <= x1 and y0 <= py <= y1:
                 return (self._current_page, local_index)
         return None
+
+    def _resolve_group_size_for_hit(self, page_index: int, redaction_index: int) -> int:
+        """PR 14b: return the number of marks in the group containing
+        the given mark, or 1 if not resolvable.
+
+        Uses ``list_redactions_grouped()`` to find the group whose marks
+        include the target. Failure modes (adapter missing, mark index
+        out of range) default to 1 so the menu falls back to
+        "This Mark" labels -- always safe.
+        """
+        adapter = self._page_cache.adapter
+        if adapter is None:
+            return 1
+        try:
+            all_pending = adapter.list_redactions()
+        except Exception:
+            return 1
+        # Filter to this page and pick the target
+        page_marks = [m for m in all_pending if m.page_index == page_index]
+        if not (0 <= redaction_index < len(page_marks)):
+            return 1
+        target = page_marks[redaction_index]
+        # Now find which group contains this mark
+        try:
+            groups = adapter.list_redactions_grouped()
+        except Exception:
+            return 1
+        for g in groups:
+            for m in g.marks:
+                if m.page_index == target.page_index and m.rect == target.rect:
+                    return g.count
+        return 1
 
     def _current_pixmap_item(self) -> QGraphicsPixmapItem | None:
         if not self._pixmap_items:
