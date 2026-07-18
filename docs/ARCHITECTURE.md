@@ -108,6 +108,31 @@ src/pdfprism/
 └── app.py                       # Entry point
 ```
 
+### Where each concern belongs
+
+The layered structure works only if each layer honours its boundaries. Concrete rules of thumb for deciding where new code lives:
+
+**Belongs in the adapter** (`core/adapters/pymupdf_adapter.py`):
+- Anything that names `pymupdf`, `pymupdf.Rect`, `annot.info`, or any other PyMuPDF-specific type
+- Any workaround for a PyMuPDF quirk (e.g. the OverlayText mirror trick from PR 14a, the encryption re-authenticate dance from PR 10.5, the delete+recreate pattern from PR 14a, the switch from a hand-rolled Pillow pipeline to `doc.rewrite_images` in PR 15)
+- Coordinate transformations between PyMuPDF conventions (0-1 float colors) and app conventions (RGB 0-255 ints)
+- Low-level primitives that map roughly 1:1 to PyMuPDF calls
+
+**Belongs in a service** (`services/redaction.py`, `services/search.py`, `services/compression.py`, ...):
+- Applying session-level defaults (e.g. the Redaction Options fill/text)
+- Constructing dataclasses from primitive args before delegating to the adapter
+- Cross-adapter-method orchestration ("do X, then Y, then Z")
+- Logging that describes business intent rather than PyMuPDF mechanics
+- Anything the UI would call
+
+**Belongs in the UI** (`ui/main_window.py`, `ui/widgets/`, `ui/dialogs/`):
+- All Qt-specific code: signals, slots, dialogs, painters, QGraphicsItems
+- Reading and writing `QSettings`, showing status-bar messages
+- Prompting the user, wiring context menus, refreshing panels after mutations
+- Anything that assumes an event loop is running
+
+A load-bearing consequence: **the UI never imports `pymupdf`, and services never import Qt.** If a proposed change would violate that, the change belongs at a different layer, or the abstraction needs adjustment (e.g. adding a new adapter primitive or service method).
+
 ## The DocumentAdapter Protocol
 
 `pdfprism.core.document.DocumentAdapter` defines what a PDF engine must
@@ -1439,6 +1464,8 @@ save separately after would be a UX trap).
 
 **PR 14c: Manage Marks dialog.** PR 14c delivers ``Redaction -> Manage Marks...``, a modal review UI surfacing every pending redaction group across the document. The dialog takes a ``RedactionService`` and session defaults at construction and owns its mutations directly -- it calls the service and emits a ``changed`` signal after each successful edit / reset / remove so MainWindow can refresh the active tab's page cache and rebind panels. Per-row actions: Edit (opens EditGroupDialog from PR 14b scoped to that group), Reset (applies session defaults; button disabled for Global rows since nothing to reset), Remove (with confirmation dialog; Cancel-focused, matches the PR 12.4 destructive-op pattern). Bulk actions via checkbox multi-select: Select All / Select None (whole-table helpers), Edit Selected (opens EditGroupDialog once, applied values overwrite every selected group's fill/text), Reset Selected (silently skips Global rows), Remove Selected (single confirmation for the whole batch). Bulk button enable state tracks selection: Edit Selected + Remove Selected enabled when >= 1 row is checked; Reset Selected additionally requires at least one Custom row in the selection. State refreshes on populate, Select All / Select None, and any checkbox toggle via ``QTableWidget.itemChanged``.
 
+**PR 15: Compression.** PR 15 delivers ``File -> Save Compressed As...``, a preset-driven flow that saves a smaller copy of the current document. The user picks a preset (Low / Balanced / High) or Custom, chooses a destination via a Save As dialog, and receives a status-bar message with the original vs compressed sizes and reduction percentage. Under the hood, compression combines three techniques: image rewriting via PyMuPDF's ``doc.rewrite_images`` (originally attempted as a hand-rolled Pillow pipeline in early sub-steps, but that corrupted image metadata since we updated the stream but not the xref's ``/Width /Height /Filter`` keys -- ``rewrite_images`` maintains everything correctly), font subsetting via ``doc.subset_fonts``, and deep object cleanup via ``doc.save(garbage=4, deflate=True, deflate_images=True, deflate_fonts=True, clean=True)``. Encryption is preserved: compressed saves reuse the source's encryption spec (matches the semantics of ``save`` with no explicit ``EncryptionSpec``). Pillow was added as a dependency early in the PR then removed when the switch to ``rewrite_images`` made it unnecessary. This PR also migrated dev dependencies from ``[project.optional-dependencies]`` to PEP 735 ``[dependency-groups]`` so ``uv sync`` installs them by default (previously ``uv remove`` would silently drop them along with any package being removed).
+
 **Deferred (M5).** PR 12 ships the
 foundation: rectangle-drag drawing on visible pages. Text-selection
 redaction (right-click selected text → Redact) is PR 12.1;
@@ -1552,7 +1579,7 @@ Per-mark inspector: different fill color and replacement text per individual pen
 
 ### Milestone 6 — Advanced editing (planned)
 
-- PR 15: Compression and linearization.
+- PR 15 (compression, **shipped**): preset-driven Save Compressed As with rewrite_images + font subset + garbage collection.
 - PR 16: Combine PDFs + images + .txt into one PDF.
 - PR 17: Visual diff between two PDFs.
 

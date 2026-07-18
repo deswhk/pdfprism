@@ -298,7 +298,7 @@ dependencies = [
     { name = "pyside6" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "mypy" },
     { name = "pre-commit" },
@@ -310,16 +310,19 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.8" },
     { name = "pymupdf", specifier = ">=1.24" },
     { name = "pyside6", specifier = ">=6.7" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "pytest-qt", marker = "extra == 'dev'", specifier = ">=4.4" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.9" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pre-commit", specifier = ">=3.8" },
+    { name = "pytest", specifier = ">=7.0" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "pytest-qt", specifier = ">=4.4" },
+    { name = "ruff", specifier = ">=0.6.9" },
+]
 
 [[package]]
 name = "platformdirs"

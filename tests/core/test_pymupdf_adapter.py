@@ -2017,3 +2017,125 @@ class TestUpdatePendingMatchingDefaults:
                 assert abs(a - b) < 0.01
         finally:
             adapter.close()
+
+
+# ---- PR 15: save_compressed ---------------------------------------
+
+
+class TestSaveCompressed:
+    def test_reduces_text_heavy_doc(self, tmp_path: Path) -> None:
+        """Positive: text-heavy doc gets smaller from garbage + fonts."""
+        # Create a fixture with padded text to make compression matter
+        import pymupdf
+
+        src = tmp_path / "src.pdf"
+        d = pymupdf.open()
+        for _ in range(10):
+            page = d.new_page(width=612, height=792)
+            page.insert_text((36, 40), "Lorem ipsum " * 500, fontsize=10)
+        d.save(str(src))
+        d.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(src)
+        try:
+            output = tmp_path / "compressed.pdf"
+            original, compressed = adapter.save_compressed(output, recompress_images=False)
+            assert original > 0
+            assert compressed > 0
+            assert compressed < original
+        finally:
+            adapter.close()
+
+    def test_skip_images_disables_recompression(self, tmp_path: Path, monkeypatch) -> None:
+        """Positive: recompress_images=False does not call rewrite pipeline."""
+        import pymupdf
+
+        src = tmp_path / "src.pdf"
+        d = pymupdf.open()
+        d.new_page(width=612, height=792)
+        d.save(str(src))
+        d.close()
+
+        called: list = []
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(src)
+
+        def _spy_recompress(**kwargs):
+            called.append(True)
+
+        monkeypatch.setattr(adapter, "_recompress_embedded_images", _spy_recompress)
+        try:
+            adapter.save_compressed(tmp_path / "out.pdf", recompress_images=False)
+            assert called == []
+        finally:
+            adapter.close()
+
+    def test_progress_callback_fires(self, tmp_path: Path) -> None:
+        """Positive: progress callback receives updates when recompressing."""
+        import pymupdf
+
+        src = tmp_path / "src.pdf"
+        d = pymupdf.open()
+        d.new_page(width=612, height=792)
+        d.save(str(src))
+        d.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(src)
+        progress_calls: list = []
+
+        def _progress(current: int, total: int) -> None:
+            progress_calls.append((current, total))
+
+        try:
+            adapter.save_compressed(
+                tmp_path / "out.pdf",
+                recompress_images=True,
+                progress_callback=_progress,
+            )
+            # Should be at least one call (start or end)
+            assert len(progress_calls) >= 1
+        finally:
+            adapter.close()
+
+    def test_returns_size_tuple(self, tmp_path: Path) -> None:
+        """Positive: returns (original_size, compressed_size) tuple."""
+        import pymupdf
+
+        src = tmp_path / "src.pdf"
+        d = pymupdf.open()
+        d.new_page(width=612, height=792)
+        d.save(str(src))
+        d.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(src)
+        try:
+            result = adapter.save_compressed(tmp_path / "out.pdf", recompress_images=False)
+            assert isinstance(result, tuple)
+            assert len(result) == 2
+            assert isinstance(result[0], int)
+            assert isinstance(result[1], int)
+        finally:
+            adapter.close()
+
+    def test_raises_when_no_source_path(self) -> None:
+        """Negative: source path unknown raises DocumentSaveError."""
+        from pdfprism.core.exceptions import DocumentSaveError
+
+        adapter = PyMuPDFAdapter()
+        # Do NOT call open(); path stays None. Call _require_open guard first.
+        # Simulate: adapter with open doc but no _path
+        import pymupdf
+
+        adapter._doc = pymupdf.open()
+        adapter._doc.new_page()
+        adapter._path = None
+        try:
+            with pytest.raises(DocumentSaveError):
+                adapter.save_compressed(Path("out.pdf"))
+        finally:
+            adapter._doc.close()
+            adapter._doc = None

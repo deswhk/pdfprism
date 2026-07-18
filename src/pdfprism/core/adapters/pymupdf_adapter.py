@@ -1054,6 +1054,177 @@ class PyMuPDFAdapter:
             raise DocumentSaveError(f"Save failed: {exc}") from exc
         self._is_dirty = False
 
+    def save_compressed(
+        self,
+        output_path: Path,
+        *,
+        jpeg_quality: int = 75,
+        image_dpi: int = 150,
+        recompress_images: bool = True,
+        subset_fonts: bool = True,
+        garbage_collect: bool = True,
+        progress_callback=None,
+    ) -> tuple[int, int]:
+        """PR 15: save a compressed copy of the document.
+
+        Compression is applied through a combination of:
+        - Font subsetting (``subset_fonts``): keep only glyphs
+          actually used in the document; typically 30-70% font
+          size reduction on docs with large embedded fonts.
+        - Object cleanup (``garbage_collect``): PyMuPDF garbage=4
+          removes unused objects and compresses object streams.
+        - Deflate compression on streams (always applied):
+          equivalent to zlib re-compression of content streams.
+        - Image recompression (``recompress_images``): rasterize
+          embedded images at ``image_dpi`` and re-encode as JPEG
+          at ``jpeg_quality``. Sub-step 3 populates this pathway;
+          this sub-step is a no-op stub for it.
+
+        Encryption is preserved on the output using the same
+        password as the source document (matches the semantics of
+        ``save`` with no explicit ``EncryptionSpec``).
+
+        The output always goes to a new path -- there is no
+        in-place semantic; users are expected to pick a fresh
+        destination via a Save As dialog.
+
+        Args:
+            output_path: destination file path.
+            jpeg_quality: 1-100. Used when recompress_images=True.
+            image_dpi: target DPI for image downsampling. Used
+                when recompress_images=True.
+            recompress_images: enable image rasterize + re-encode
+                pipeline. Sub-step 3 makes this effective; sub-
+                step 2 leaves it as a no-op.
+            subset_fonts: subset embedded fonts to used glyphs only.
+            garbage_collect: apply PyMuPDF garbage=4 cleanup.
+            progress_callback: optional ``callable(current, total)``
+                for progress reporting during image recompression.
+
+        Returns:
+            (original_size_bytes, compressed_size_bytes) tuple.
+            Original size is measured from the current source path;
+            compressed size is measured from the freshly written
+            output_path.
+
+        Raises:
+            DocumentSaveError: on any I/O or PyMuPDF failure.
+        """
+        self._require_open()
+        assert self._doc is not None
+        if self._path is None:
+            raise DocumentSaveError(
+                "Cannot compress: source path unknown (document not opened from disk)"
+            )
+        try:
+            original_size = self._path.stat().st_size
+        except OSError as exc:
+            raise DocumentSaveError(f"Cannot stat source: {exc}") from exc
+
+        # PR 15 sub-step 3 will populate this pathway.
+        if recompress_images:
+            self._recompress_embedded_images(
+                jpeg_quality=jpeg_quality,
+                image_dpi=image_dpi,
+                progress_callback=progress_callback,
+            )
+
+        # Font subsetting: harmless best-effort. PyMuPDF returns silently
+        # if no fonts can be subset. We log rather than raise.
+        if subset_fonts:
+            try:
+                self._doc.subset_fonts()
+            except Exception as exc:
+                logger.info("Font subsetting skipped: %s", exc)
+
+        # PR 10.5: preserve encryption on compressed output.
+        save_kwargs = self._encryption_save_kwargs(None)
+        if garbage_collect:
+            save_kwargs["garbage"] = 4
+        save_kwargs["deflate"] = True
+        save_kwargs["deflate_images"] = True
+        save_kwargs["deflate_fonts"] = True
+        save_kwargs["clean"] = True
+
+        try:
+            self._doc.save(str(output_path), **save_kwargs)
+        except (OSError, RuntimeError) as exc:
+            raise DocumentSaveError(f"Compressed save failed: {exc}") from exc
+
+        try:
+            compressed_size = output_path.stat().st_size
+        except OSError as exc:
+            raise DocumentSaveError(f"Compressed file written but cannot stat: {exc}") from exc
+        logger.info(
+            "Compressed %s -> %s: %d bytes -> %d bytes (%.1f%% reduction)",
+            self._path.name,
+            output_path.name,
+            original_size,
+            compressed_size,
+            100.0 * (1 - compressed_size / original_size) if original_size else 0.0,
+        )
+        return (original_size, compressed_size)
+
+    def _recompress_embedded_images(
+        self,
+        *,
+        jpeg_quality: int,
+        image_dpi: int,
+        progress_callback,
+    ) -> None:
+        """PR 15: rewrite embedded images via PyMuPDF's ``rewrite_images``.
+
+        Uses PyMuPDF's built-in image rewriting rather than a hand-rolled
+        Pillow pipeline. The built-in correctly maintains xref metadata
+        (Width / Height / Filter / ColorSpace), handles alpha channels,
+        CMYK, and undecodable formats without silent corruption.
+
+        DPI semantics: we expose a single ``image_dpi`` (target) to the
+        caller. Internally we set ``dpi_threshold`` slightly higher than
+        the target (1.33x) so images already close to the target are
+        left alone -- avoids re-encoding artefacts on images that don't
+        need it. PyMuPDF requires dpi_target < dpi_threshold.
+
+        Progress callback fires once before and once after the rewrite
+        since rewrite_images has no per-image hook. Callers relying on
+        determinate progress should treat this as a "busy" indicator
+        instead.
+        """
+        assert self._doc is not None
+
+        if progress_callback is not None:
+            try:
+                progress_callback(0, 1)
+            except Exception:
+                pass
+
+        # Target DPI must be < threshold DPI per PyMuPDF constraint.
+        # Use 1.33x buffer (150 DPI target -> 200 DPI threshold).
+        dpi_threshold = max(int(image_dpi * 1.33), image_dpi + 1)
+
+        try:
+            self._doc.rewrite_images(
+                dpi_threshold=dpi_threshold,
+                dpi_target=image_dpi,
+                quality=jpeg_quality,
+                lossy=True,
+                lossless=True,
+                bitonal=False,
+                color=True,
+                gray=True,
+            )
+        except Exception as exc:
+            # rewrite_images can fail on unusual color spaces or protected
+            # image encodings. Log and continue -- the rest of compression
+            # (font subsetting, garbage collection) still applies.
+            logger.info("rewrite_images skipped: %s", exc)
+
+        if progress_callback is not None:
+            try:
+                progress_callback(1, 1)
+            except Exception:
+                pass
+
     def _encryption_save_kwargs(
         self,
         spec: EncryptionSpec | None,
