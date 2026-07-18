@@ -42,6 +42,7 @@ from pdfprism.ui.dialogs.extract import ExtractDialog, ExtractKind
 from pdfprism.ui.dialogs.extract_pages import ExtractPagesDialog
 from pdfprism.ui.dialogs.goto_page import GotoPageDialog
 from pdfprism.ui.dialogs.insert_pages import InsertPagesDialog
+from pdfprism.ui.dialogs.manage_marks import ManageMarksDialog
 from pdfprism.ui.dialogs.merge import MergeDialog
 from pdfprism.ui.dialogs.password import PasswordDialog
 from pdfprism.ui.dialogs.properties import PropertiesDialog
@@ -422,6 +423,15 @@ class MainWindow(QMainWindow):
         self.act_redaction_options = QAction("&Options...", self)
         self.act_redaction_options.triggered.connect(self._on_redaction_options)
         self.act_redaction_options.setEnabled(True)  # session config; always available
+
+        # PR 14c: Manage Marks dialog for reviewing / editing / removing pending
+        # marks grouped by extracted text.
+        self.act_redaction_manage = QAction("&Manage Marks...", self)
+        self.act_redaction_manage.triggered.connect(self._on_redaction_manage)
+        self.act_redaction_manage.setEnabled(False)
+        self.act_redaction_manage.setToolTip(
+            "Review, edit, reset, or remove pending redaction marks"
+        )
         self.act_redaction_options.setToolTip(
             "Configure redaction fill color, replacement text, and apply behavior"
         )
@@ -594,6 +604,7 @@ class MainWindow(QMainWindow):
         redaction_menu.addAction(self.act_redaction_clear)
         redaction_menu.addSeparator()
         redaction_menu.addAction(self.act_redaction_search)
+        redaction_menu.addAction(self.act_redaction_manage)
         redaction_menu.addSeparator()
         redaction_menu.addAction(self.act_redaction_options)
 
@@ -1707,6 +1718,39 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage("Redaction options saved", 3000)
 
+    def _on_redaction_manage(self) -> None:
+        """PR 14c: open the Manage Marks dialog on the active tab.
+
+        Wires the dialog's ``changed`` signal to refresh the active
+        DocumentView's page cache and rebind panels, so any edit /
+        reset / remove is reflected immediately in the underlying
+        page view and thumbnails.
+        """
+        current = self._tab_widget.currentWidget()
+        if current is None or not hasattr(current, "_adapter"):
+            return
+        adapter = current._adapter
+        service = RedactionService(
+            adapter,
+            fill_color=self._redaction_fill_color,
+            replacement_text=self._redaction_replacement_text,
+        )
+        dlg = ManageMarksDialog(
+            service=service,
+            session_fill=self._redaction_fill_color,
+            session_text=self._redaction_replacement_text,
+            parent=self,
+        )
+
+        def _on_changed(_count: int) -> None:
+            current._refresh_modified()
+            current._page_cache.clear()
+            current._page_view.set_adapter(adapter)
+            current._thumbnail_panel.set_adapter(adapter)
+
+        dlg.changed.connect(_on_changed)
+        dlg.exec()
+
     def _propagate_redaction_options(self) -> None:
         """PR 12.3: push session redaction defaults to every open tab."""
         for i in range(self._tab_widget.count()):
@@ -1973,6 +2017,7 @@ class MainWindow(QMainWindow):
         self.act_redaction_apply.setEnabled(has_tab)
         self.act_redaction_clear.setEnabled(has_tab)
         self.act_redaction_search.setEnabled(has_tab)
+        self.act_redaction_manage.setEnabled(has_tab)
         # Merge requires at least 2 open tabs.
         self.act_merge.setEnabled(self._tab_widget.count() >= 2)
 
