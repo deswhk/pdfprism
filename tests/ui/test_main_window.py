@@ -3092,3 +3092,42 @@ class TestRestylePendingMatchingOldDefaults:
         current_defaults, new_defaults = call_log[0]
         assert current_defaults == (old_fill, old_text)
         assert new_defaults == ((255, 0, 0), "[NEW]")
+
+
+# ---- PR 14c: Manage Marks slot -----------------------------------
+
+
+class TestOnRedactionManage:
+    def test_no_op_when_no_tab_open(self, main_window) -> None:
+        """Positive: no active tab -> _on_redaction_manage returns silently."""
+        # Nothing raises
+        main_window._on_redaction_manage()
+
+    def test_opens_dialog_when_tab_open(self, main_window, sample_pdf_path, monkeypatch) -> None:
+        """Positive: with tab open, slot instantiates + exec()s dialog."""
+        main_window._open_path(sample_pdf_path)
+
+        exec_calls: list = []
+
+        class _StubDialog:
+            def __init__(self, **kwargs):
+                exec_calls.append(kwargs)
+
+            def exec(self):
+                return 1
+
+            @property
+            def changed(self):
+                # Return an object with a .connect method
+                class _Sig:
+                    def connect(self, cb):
+                        pass
+
+                return _Sig()
+
+        import pdfprism.ui.main_window as mw_mod
+
+        monkeypatch.setattr(mw_mod, "ManageMarksDialog", _StubDialog)
+
+        main_window._on_redaction_manage()
+        assert len(exec_calls) == 1
