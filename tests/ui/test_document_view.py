@@ -479,25 +479,74 @@ class TestRedactSelectionSlot:
 
 
 class TestRemoveMarkSlot:
-    """PR 12.5: _on_remove_mark_requested delegates to adapter."""
+    """PR 12.5 (redefined by PR 14b): _on_remove_mark_requested is group-scoped."""
 
-    def test_delegates_to_adapter(self, mutable_view: DocumentView, monkeypatch) -> None:
-        """Positive: slot calls adapter.remove_redaction with args."""
-        remove_calls: list = []
-        monkeypatch.setattr(
-            mutable_view._adapter,
-            "remove_redaction",
-            lambda p, i: remove_calls.append((p, i)),
+    def _make_stub_group(self, normalized_text: str = "target_group"):
+        """Helper: build a minimal RedactionGroup for stubbing resolution."""
+        from pdfprism.core.types import Redaction, RedactionGroup
+
+        marks = [
+            Redaction(page_index=2, rect=(0.0, 0.0, 10.0, 10.0)),
+        ]
+        return RedactionGroup(
+            text=normalized_text,
+            normalized_text=normalized_text,
+            marks=marks,
+            is_customized=False,
         )
+
+    def test_delegates_to_service_remove_group(
+        self, mutable_view: DocumentView, monkeypatch
+    ) -> None:
+        """Positive: slot resolves group and calls service.remove_redaction_group."""
+        stub_group = self._make_stub_group()
+        monkeypatch.setattr(
+            mutable_view,
+            "_resolve_group_for_mark",
+            lambda p, i: stub_group,
+        )
+        remove_calls: list = []
+
+        class _SpyService:
+            def __init__(self, a, **kw):
+                pass
+
+            def remove_redaction_group(self, key):
+                remove_calls.append(key)
+                return 1
+
+        # Patch the RedactionService import path used inside the slot
+        import pdfprism.services.redaction as svc_mod
+
+        monkeypatch.setattr(svc_mod, "RedactionService", _SpyService)
+
         mutable_view._on_remove_mark_requested(2, 4)
-        assert remove_calls == [(2, 4)]
+        assert remove_calls == ["target_group"]
 
     def test_rebinds_panels(self, mutable_view: DocumentView, monkeypatch) -> None:
-        """Positive: slot rebinds page_view + thumbnail_panel after removal."""
+        """Positive: slot rebinds panels after removal."""
+        stub_group = self._make_stub_group()
+        monkeypatch.setattr(
+            mutable_view,
+            "_resolve_group_for_mark",
+            lambda p, i: stub_group,
+        )
+
+        # Stub service that returns success
+        class _StubService:
+            def __init__(self, a, **kw):
+                pass
+
+            def remove_redaction_group(self, key):
+                return 1
+
+        import pdfprism.services.redaction as svc_mod
+
+        monkeypatch.setattr(svc_mod, "RedactionService", _StubService)
+
         page_view_binds: list = []
         thumbnail_binds: list = []
         cache_clears: list = []
-        monkeypatch.setattr(mutable_view._adapter, "remove_redaction", lambda p, i: None)
         monkeypatch.setattr(
             mutable_view._page_view,
             "set_adapter",
@@ -518,15 +567,14 @@ class TestRemoveMarkSlot:
         assert len(page_view_binds) == 1
         assert len(thumbnail_binds) == 1
 
-    def test_adapter_error_is_silent(self, mutable_view: DocumentView, monkeypatch) -> None:
-        """Positive: adapter raises (race with concurrent removal) -> silent no-op."""
-        from pdfprism.core.exceptions import PageOutOfRangeError
-
-        def _raise(p, i):
-            raise PageOutOfRangeError("stale index")
-
-        monkeypatch.setattr(mutable_view._adapter, "remove_redaction", _raise)
-        # Also verify no rebind occurred (defensive)
+    def test_unresolvable_mark_is_silent(self, mutable_view: DocumentView, monkeypatch) -> None:
+        """Positive: group resolution returns None -> silent no-op."""
+        monkeypatch.setattr(
+            mutable_view,
+            "_resolve_group_for_mark",
+            lambda p, i: None,
+        )
+        # Verify no rebind occurred
         page_view_binds: list = []
         monkeypatch.setattr(
             mutable_view._page_view,
@@ -536,3 +584,188 @@ class TestRemoveMarkSlot:
         # Must not raise
         mutable_view._on_remove_mark_requested(999, 0)
         assert page_view_binds == []
+
+
+class TestEditGroupSlot:
+    """PR 14b: _on_edit_group_requested opens dialog and applies changes."""
+
+    def _make_stub_group(self, is_customized: bool = False):
+        from pdfprism.core.types import Redaction, RedactionGroup
+
+        marks = [
+            Redaction(
+                page_index=0,
+                rect=(0.0, 0.0, 10.0, 10.0),
+                fill_color=(0, 0, 0),
+                replacement_text=None,
+            ),
+        ]
+        return RedactionGroup(
+            text="target",
+            normalized_text="target",
+            marks=marks,
+            is_customized=is_customized,
+        )
+
+    def test_no_op_when_group_unresolvable(self, mutable_view, monkeypatch) -> None:
+        """Positive: _resolve_group_for_mark returns None -> silent no-op."""
+        monkeypatch.setattr(
+            mutable_view,
+            "_resolve_group_for_mark",
+            lambda p, i: None,
+        )
+        page_view_binds: list = []
+        monkeypatch.setattr(
+            mutable_view._page_view,
+            "set_adapter",
+            lambda a: page_view_binds.append(a),
+        )
+        mutable_view._on_edit_group_requested(0, 0)
+        assert page_view_binds == []
+
+    def test_ok_dialog_calls_update_group(self, mutable_view, monkeypatch) -> None:
+        """Positive: dialog OK -> service.update_redaction_group with dialog values."""
+        stub_group = self._make_stub_group()
+        monkeypatch.setattr(
+            mutable_view,
+            "_resolve_group_for_mark",
+            lambda p, i: stub_group,
+        )
+
+        # Stub EditGroupDialog -- accepts with custom values
+        class _StubDialog:
+            def __init__(self, **kwargs):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            @property
+            def fill_color(self):
+                return (255, 0, 0)
+
+            @property
+            def replacement_text(self):
+                return "[EDITED]"
+
+            @property
+            def was_reset(self):
+                return False
+
+        import pdfprism.ui.widgets.document_view as dv_mod
+
+        monkeypatch.setattr(dv_mod, "EditGroupDialog", _StubDialog)
+
+        update_calls: list = []
+
+        class _SpyService:
+            def __init__(self, a, **kw):
+                pass
+
+            def update_redaction_group(self, key, fill, text):
+                update_calls.append((key, fill, text))
+                return 1
+
+        import pdfprism.services.redaction as svc_mod
+
+        monkeypatch.setattr(svc_mod, "RedactionService", _SpyService)
+
+        mutable_view._on_edit_group_requested(0, 0)
+        assert update_calls == [("target", (255, 0, 0), "[EDITED]")]
+
+    def test_reset_uses_session_defaults(self, mutable_view, monkeypatch) -> None:
+        """Positive: dialog Reset -> service.update_redaction_group with session defaults."""
+        stub_group = self._make_stub_group(is_customized=True)
+        monkeypatch.setattr(
+            mutable_view,
+            "_resolve_group_for_mark",
+            lambda p, i: stub_group,
+        )
+        # Set specific session defaults on the view
+        mutable_view.set_redaction_options(
+            fill_color=(0, 255, 0),
+            replacement_text="[SESSION]",
+        )
+
+        class _ResetDialog:
+            def __init__(self, **kwargs):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            @property
+            def fill_color(self):
+                return (200, 200, 200)  # different -- should be ignored
+
+            @property
+            def replacement_text(self):
+                return "[IGNORED]"
+
+            @property
+            def was_reset(self):
+                return True
+
+        import pdfprism.ui.widgets.document_view as dv_mod
+
+        monkeypatch.setattr(dv_mod, "EditGroupDialog", _ResetDialog)
+
+        update_calls: list = []
+
+        class _SpyService:
+            def __init__(self, a, **kw):
+                pass
+
+            def update_redaction_group(self, key, fill, text):
+                update_calls.append((key, fill, text))
+                return 1
+
+        import pdfprism.services.redaction as svc_mod
+
+        monkeypatch.setattr(svc_mod, "RedactionService", _SpyService)
+
+        mutable_view._on_edit_group_requested(0, 0)
+        assert update_calls == [("target", (0, 255, 0), "[SESSION]")]
+
+    def test_cancel_dialog_no_update(self, mutable_view, monkeypatch) -> None:
+        """Positive: dialog Cancel -> no update call."""
+        stub_group = self._make_stub_group()
+        monkeypatch.setattr(
+            mutable_view,
+            "_resolve_group_for_mark",
+            lambda p, i: stub_group,
+        )
+
+        class _CancelDialog:
+            def __init__(self, **kwargs):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Rejected
+
+        import pdfprism.ui.widgets.document_view as dv_mod
+
+        monkeypatch.setattr(dv_mod, "EditGroupDialog", _CancelDialog)
+
+        update_calls: list = []
+
+        class _SpyService:
+            def __init__(self, a, **kw):
+                pass
+
+            def update_redaction_group(self, key, fill, text):
+                update_calls.append((key, fill, text))
+                return 1
+
+        import pdfprism.services.redaction as svc_mod
+
+        monkeypatch.setattr(svc_mod, "RedactionService", _SpyService)
+
+        mutable_view._on_edit_group_requested(0, 0)
+        assert update_calls == []
