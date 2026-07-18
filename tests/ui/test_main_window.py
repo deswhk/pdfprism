@@ -3131,3 +3131,33 @@ class TestOnRedactionManage:
 
         main_window._on_redaction_manage()
         assert len(exec_calls) == 1
+
+
+# ---- PR 15: Save Compressed As slot ----------------------------
+
+
+class TestOnSaveCompressedAs:
+    def test_no_op_when_no_tab_open(self, main_window) -> None:
+        """Positive: no active tab -> silent no-op."""
+        main_window._on_save_compressed_as()
+
+    def test_warns_when_no_source_path(self, main_window, sample_pdf_path, monkeypatch) -> None:
+        """Positive: adapter has no _path -> warn user, no dialog opens."""
+        main_window._open_path(sample_pdf_path)
+        # Simulate: adapter with no _path attribute
+        adapter = main_window._active_tab._adapter
+        # Save original then override
+        monkeypatch.setattr(adapter, "_path", None)
+
+        warn_calls: list = []
+
+        from PySide6.QtWidgets import QMessageBox
+
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda *args, **kwargs: warn_calls.append(args) or 0,
+        )
+
+        main_window._on_save_compressed_as()
+        assert len(warn_calls) == 1

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QStackedWidget,
     QTabWidget,
     QToolBar,
@@ -29,6 +30,7 @@ from pdfprism.core.exceptions import (
     PdfPrismError,
 )
 from pdfprism.core.types import CrossDocHit
+from pdfprism.services.compression import CompressionService
 from pdfprism.services.extract import ExtractService
 from pdfprism.services.pages import PageService
 from pdfprism.services.pages import merge as merge_documents
@@ -36,6 +38,7 @@ from pdfprism.services.properties import PropertiesService
 from pdfprism.services.redaction import RedactionService
 from pdfprism.services.search import SearchScope, SearchService
 from pdfprism.ui.dialogs.about import AboutDialog
+from pdfprism.ui.dialogs.compression import CompressionDialog
 from pdfprism.ui.dialogs.crop import CropDialog
 from pdfprism.ui.dialogs.crypt import CryptDialog
 from pdfprism.ui.dialogs.extract import ExtractDialog, ExtractKind
@@ -219,6 +222,14 @@ class MainWindow(QMainWindow):
         self.act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.act_save_as.triggered.connect(self._on_save_as)
         self.act_save_as.setEnabled(False)
+
+        # PR 15: Save Compressed As
+        self.act_save_compressed_as = QAction("Save &Compressed As...", self)
+        self.act_save_compressed_as.triggered.connect(self._on_save_compressed_as)
+        self.act_save_compressed_as.setEnabled(False)
+        self.act_save_compressed_as.setToolTip(
+            "Save a compressed copy with a preset for size/quality tradeoff"
+        )
 
         self.act_close_doc = QAction("&Close Tab", self)
         self.act_close_doc.setShortcut(QKeySequence.StandardKey.Close)
@@ -547,6 +558,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
+        file_menu.addAction(self.act_save_compressed_as)
         file_menu.addSeparator()
         file_menu.addAction(self.act_close_doc)
         extract_menu = file_menu.addMenu("&Extract")
@@ -1940,6 +1952,93 @@ class MainWindow(QMainWindow):
             return
         self._refresh_save_actions()
 
+    def _on_save_compressed_as(self) -> None:
+        """PR 15: prompt for compression settings + destination, then save.
+
+        Flow: CompressionDialog (settings) -> QFileDialog (destination
+        with suggested filename) -> QProgressDialog (progress feedback
+        during image recompression) -> status bar message with the
+        original vs compressed size and reduction percentage.
+
+        The original document is not modified; compression writes to a
+        new file at the chosen destination.
+        """
+        tab = self._active_tab
+        if tab is None:
+            return
+        adapter = tab._adapter
+        source_path = getattr(adapter, "_path", None)
+        if source_path is None:
+            QMessageBox.warning(
+                self,
+                "Cannot Compress",
+                "Cannot compress an unsaved or in-memory document.",
+            )
+            return
+
+        dlg = CompressionDialog(parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # Prompt for output path with a sensible suggested name.
+        suggested = source_path.with_stem(f"{source_path.stem}_compressed")
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings()
+        last_dir = settings.value("recent/last_dir", "")
+        start_dir = last_dir if last_dir else str(suggested.parent)
+        chosen_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Compressed As",
+            str(suggested) if not last_dir else str(Path(start_dir) / suggested.name),
+            "PDF files (*.pdf);;All files (*)",
+        )
+        if not chosen_str:
+            return
+        target = Path(chosen_str)
+
+        # Progress dialog: fires per image processed.
+        progress_dialog = QProgressDialog("Compressing images...", "Cancel", 0, 0, self)
+        progress_dialog.setWindowTitle("Save Compressed As")
+        progress_dialog.setMinimumDuration(400)
+        progress_dialog.setValue(0)
+
+        def _progress(current: int, total: int) -> None:
+            if total > 0:
+                progress_dialog.setMaximum(total)
+                progress_dialog.setValue(current)
+            QApplication.processEvents()
+
+        service = CompressionService(adapter)
+        try:
+            original_size, compressed_size = service.save_compressed(
+                target,
+                jpeg_quality=dlg.jpeg_quality,
+                image_dpi=dlg.image_dpi,
+                recompress_images=dlg.recompress_images,
+                subset_fonts=dlg.subset_fonts,
+                garbage_collect=dlg.garbage_collect,
+                progress_callback=_progress,
+            )
+        except Exception as exc:
+            progress_dialog.cancel()
+            QMessageBox.critical(self, "Compression Failed", str(exc))
+            return
+        finally:
+            progress_dialog.cancel()
+
+        settings.setValue("recent/last_dir", str(target.parent))
+
+        if original_size > 0:
+            reduction_pct = 100.0 * (1 - compressed_size / original_size)
+        else:
+            reduction_pct = 0.0
+        self.statusBar().showMessage(
+            f"Compressed: {original_size:,} -> {compressed_size:,} bytes "
+            f"({reduction_pct:.1f}% reduction) -> {target.name}",
+            8000,
+        )
+
     def _on_save_as(self) -> None:
         if self._active_tab is None:
             return
@@ -1985,6 +2084,7 @@ class MainWindow(QMainWindow):
         has_tab = self._active_tab is not None
         self.act_save.setEnabled(has_tab and self._active_tab.is_modified)
         self.act_save_as.setEnabled(has_tab)
+        self.act_save_compressed_as.setEnabled(has_tab)
         # Page operations also enable/disable with active tab.
         for act in (
             self.act_rotate_right,
