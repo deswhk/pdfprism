@@ -85,6 +85,33 @@ class ThumbnailPanel(QListView):
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # PR 17.5: thumbnail visibility polish -- borders + selection highlight.
+        # Colors chosen to read well in both light and dark themes:
+        # - Each item gets a subtle semi-transparent gray border so pages
+        #   are visually separated instead of running together
+        # - Selected item gets a 3px accent-blue border + light blue tint
+        #   background so the current page is unmistakable in either theme
+        # - Hover gets a soft gray tint to signal clickability
+        self.setSpacing(6)
+        self.setStyleSheet(
+            "QListView::item {"
+            "    border: 1px solid rgba(128, 128, 128, 80);"
+            "    border-radius: 4px;"
+            "    padding: 4px;"
+            "    margin: 0px;"
+            "}"
+            "QListView::item:hover {"
+            "    background-color: rgba(59, 130, 246, 60);"
+            "}"
+            "QListView::item:selected {"
+            "    border: 3px solid #3b82f6;"
+            "    background-color: rgba(59, 130, 246, 40);"
+            "}"
+            "QListView::item:selected:active {"
+            "    border: 3px solid #3b82f6;"
+            "    background-color: rgba(59, 130, 246, 40);"
+            "}"
+        )
 
         self.clicked.connect(self._on_clicked)
 
