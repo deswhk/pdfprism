@@ -2288,3 +2288,62 @@ class TestReconcileCombinedGroups:
                 assert m.replacement_text == "[X]"
         finally:
             verify.close()
+
+
+# ---- PR 17a: extract_words_with_boxes -----------------------------
+
+
+class TestExtractWordsWithBoxes:
+    def _make_doc(self, tmp_path: Path, pages_text: list[str]) -> Path:
+        """Create a doc with the given per-page text, return path."""
+        import pymupdf
+
+        path = tmp_path / "words.pdf"
+        d = pymupdf.open()
+        for text in pages_text:
+            page = d.new_page(width=612, height=792)
+            page.insert_text((72, 100), text, fontsize=12)
+        d.save(str(path))
+        d.close()
+        return path
+
+    def test_extracts_all_words(self, tmp_path: Path) -> None:
+        """Positive: all words on a single-page doc are returned."""
+        path = self._make_doc(tmp_path, ["The quick brown fox"])
+        adapter = PyMuPDFAdapter()
+        adapter.open(path)
+        try:
+            words = adapter.extract_words_with_boxes()
+        finally:
+            adapter.close()
+        just_words = [w for _, _, w in words]
+        assert just_words == ["The", "quick", "brown", "fox"]
+
+    def test_multi_page_page_indices(self, tmp_path: Path) -> None:
+        """Positive: words carry the correct page_index."""
+        path = self._make_doc(tmp_path, ["First page word", "Second page word"])
+        adapter = PyMuPDFAdapter()
+        adapter.open(path)
+        try:
+            words = adapter.extract_words_with_boxes()
+        finally:
+            adapter.close()
+        pages_by_word = {w: pi for pi, _, w in words}
+        assert pages_by_word["First"] == 0
+        assert pages_by_word["Second"] == 1
+
+    def test_returns_bbox_shape(self, tmp_path: Path) -> None:
+        """Positive: each entry has a 4-tuple bbox with x0<x1, y0<y1."""
+        path = self._make_doc(tmp_path, ["Sample text"])
+        adapter = PyMuPDFAdapter()
+        adapter.open(path)
+        try:
+            words = adapter.extract_words_with_boxes()
+        finally:
+            adapter.close()
+        assert words
+        for _, bbox, _ in words:
+            assert len(bbox) == 4
+            x0, y0, x1, y1 = bbox
+            assert x0 < x1
+            assert y0 < y1
