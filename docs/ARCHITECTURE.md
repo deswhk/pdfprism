@@ -1577,13 +1577,13 @@ work.
 
 **PR 11.5 (deferred): Permissions dialog.** After PR 11 dropped permissions from scope (PyMuPDF's ``permissions=`` save kwarg only takes effect when user_pw and owner_pw are distinct -- otherwise the reader authenticates as owner and all restrictions are silently overridden; enforcement is honor-system anyway, not cryptographic), permissions is deferred. If a concrete user requirement emerges, PR 11.5 would add an Adobe-style dual-password dialog with an explicit owner-password field, an explanation of the honor-system caveat, and grouped permission checkboxes. Reference design: Adobe Acrobat's File → Properties → Security tab.
 
-### Milestone 5 — Per-mark redaction customization (planned)
+### Milestone 5 — Per-mark redaction customization (complete)
 
 Per-mark inspector: different fill color and replacement text per individual pending redaction annotation. PR 12.3 delivered session-level defaults; PR 14 would let power users override the defaults on a mark-by-mark basis (e.g. black rectangles for names, striped patterns for account numbers, "[SSN]" replacement text on tax IDs). Requires UX design work — likely a per-mark inspector panel that appears when a mark is selected, with fields mirroring the Options dialog. Sub-step split (PR 14a: inspector panel + selection state; PR 14b: session-defaults override) to be decided during design Q&A.
 
 - PR 14a (foundation, **shipped**): adapter grouping + session-defaults restyle on Options change. PR 14b (right-click Edit/Remove Group, **shipped**): adaptive context menu + EditGroupDialog. PR 14c (Manage Marks dialog, **shipped**): grouped review UI + bulk operations. Milestone 5 complete.
 
-### Milestone 6 — Advanced editing (planned)
+### Milestone 6 — Advanced editing (complete)
 
 - PR 15 (compression, **shipped**): preset-driven Save Compressed As with rewrite_images + font subset + garbage collection.
 - PR 16 (combine, **shipped**): multi-source PDF concatenation with last-source-wins redaction reconciliation. Image/txt input deferred to PR 16.5.
