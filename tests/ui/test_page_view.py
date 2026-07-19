@@ -862,3 +862,58 @@ class TestResolveGroupSizeForHit:
         page_view.set_adapter(adapter_with_doc)
         size = page_view._resolve_group_size_for_hit(0, 999)
         assert size == 1
+
+
+# ---- PR 17.6: continuous-mode redaction --------------------------
+
+
+class TestContinuousModeRedaction:
+    def test_page_at_scene_y_empty(self, page_view: PageView) -> None:
+        """Positive: empty _page_offsets returns -1."""
+        assert page_view._page_at_scene_y(0.0) == -1
+        assert page_view._page_at_scene_y(100.0) == -1
+
+    def test_page_at_scene_y_finds_correct_page(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: scene-y within a page returns that page's index."""
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_view_mode(ViewMode.CONTINUOUS)
+        # After building continuous layout, _page_offsets is populated
+        assert len(page_view._page_offsets) == adapter_with_doc.page_count
+        # Y in page 0's range (at page offset 0)
+        assert page_view._page_at_scene_y(page_view._page_offsets[0]) == 0
+        # Y in page 1's range (at page 1's offset)
+        assert page_view._page_at_scene_y(page_view._page_offsets[1]) == 1
+
+    def test_page_at_scene_y_clamps_above(
+        self, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: negative scene-y still returns page 0 (clamp above)."""
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_view_mode(ViewMode.CONTINUOUS)
+        assert page_view._page_at_scene_y(-100.0) == 0
+
+    def test_continuous_drag_emits_correct_page(
+        self, qtbot, page_view: PageView, adapter_with_doc: PyMuPDFAdapter
+    ) -> None:
+        """Positive: drag in continuous mode emits redaction_requested
+        with the page_index where the drag ANCHORED, not _current_page."""
+        page_view.set_adapter(adapter_with_doc)
+        page_view.set_view_mode(ViewMode.CONTINUOUS)
+        # Anchor drag on page 1 (mid-page)
+        # Get page 1's scene offset and pick a point inside its rect.
+        page1_offset = page_view._page_offsets[1]
+        # Anchor at a point clearly on page 1
+        anchor = QPointF(50.0, page1_offset + 50.0)
+        current = QPointF(200.0, page1_offset + 200.0)
+        page_view._tool_mode = ToolMode.REDACTION
+        page_view._redaction_anchor = anchor
+        # Capture emitted signal
+        emitted: list[tuple[int, tuple[float, float, float, float]]] = []
+        page_view.redaction_requested.connect(lambda pi, rect: emitted.append((pi, rect)))
+        # Invoke the drag commit
+        page_view._commit_redaction_drag(anchor, current)
+        assert len(emitted) == 1
+        page_index, _rect = emitted[0]
+        assert page_index == 1
