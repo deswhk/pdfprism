@@ -30,6 +30,7 @@ from pdfprism.core.exceptions import (
     PdfPrismError,
 )
 from pdfprism.core.types import CrossDocHit
+from pdfprism.services.combine import CombineService
 from pdfprism.services.compression import CompressionService
 from pdfprism.services.extract import ExtractService
 from pdfprism.services.pages import PageService
@@ -38,6 +39,7 @@ from pdfprism.services.properties import PropertiesService
 from pdfprism.services.redaction import RedactionService
 from pdfprism.services.search import SearchScope, SearchService
 from pdfprism.ui.dialogs.about import AboutDialog
+from pdfprism.ui.dialogs.combine import CombineDialog
 from pdfprism.ui.dialogs.compression import CompressionDialog
 from pdfprism.ui.dialogs.crop import CropDialog
 from pdfprism.ui.dialogs.crypt import CryptDialog
@@ -230,6 +232,12 @@ class MainWindow(QMainWindow):
         self.act_save_compressed_as.setToolTip(
             "Save a compressed copy with a preset for size/quality tradeoff"
         )
+
+        # PR 16: Combine PDFs
+        self.act_combine = QAction("&Combine PDFs...", self)
+        self.act_combine.triggered.connect(self._on_combine)
+        self.act_combine.setEnabled(True)
+        self.act_combine.setToolTip("Combine multiple PDFs into a single new document")
 
         self.act_close_doc = QAction("&Close Tab", self)
         self.act_close_doc.setShortcut(QKeySequence.StandardKey.Close)
@@ -559,6 +567,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
         file_menu.addAction(self.act_save_compressed_as)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_combine)
         file_menu.addSeparator()
         file_menu.addAction(self.act_close_doc)
         extract_menu = file_menu.addMenu("&Extract")
@@ -2036,6 +2046,76 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Compressed: {original_size:,} -> {compressed_size:,} bytes "
             f"({reduction_pct:.1f}% reduction) -> {target.name}",
+            8000,
+        )
+
+    def _on_combine(self) -> None:
+        """PR 16: prompt for source PDFs + destination, run combine, open result.
+
+        Flow: CombineDialog (source list, drag-reorderable) ->
+        QFileDialog (destination for combined output) -> progress
+        dialog per source processed -> open the combined file in a
+        new tab. Status bar reports the total pages combined.
+        """
+        dlg = CombineDialog(parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        sources = dlg.sources
+        if len(sources) < 2:
+            return  # dialog should prevent this, but guard anyway
+
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings()
+        last_dir = settings.value("recent/last_dir", "")
+        if last_dir:
+            suggested_dir = Path(last_dir)
+        else:
+            suggested_dir = sources[0].parent
+        suggested = suggested_dir / "combined.pdf"
+        chosen_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Combined PDF As",
+            str(suggested),
+            "PDF files (*.pdf);;All files (*)",
+        )
+        if not chosen_str:
+            return
+        target = Path(chosen_str)
+
+        progress_dialog = QProgressDialog("Combining sources...", "Cancel", 0, len(sources), self)
+        progress_dialog.setWindowTitle("Combine PDFs")
+        progress_dialog.setMinimumDuration(400)
+        progress_dialog.setValue(0)
+
+        def _progress(current: int, total: int) -> None:
+            progress_dialog.setMaximum(total)
+            progress_dialog.setValue(current)
+            QApplication.processEvents()
+
+        # Combine uses a fresh adapter -- no active document required.
+        adapter = PyMuPDFAdapter()
+        service = CombineService(adapter)
+        try:
+            page_count = service.combine(
+                sources,
+                target,
+                progress_callback=_progress,
+            )
+        except Exception as exc:
+            progress_dialog.cancel()
+            QMessageBox.critical(self, "Combine Failed", str(exc))
+            return
+        finally:
+            progress_dialog.cancel()
+
+        settings.setValue("recent/last_dir", str(target.parent))
+
+        # Open the combined file in a new tab so the user sees it.
+        self._open_path(target)
+
+        self.statusBar().showMessage(
+            f"Combined {len(sources)} PDFs -> {target.name} ({page_count} pages)",
             8000,
         )
 

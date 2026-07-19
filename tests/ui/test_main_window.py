@@ -3161,3 +3161,49 @@ class TestOnSaveCompressedAs:
 
         main_window._on_save_compressed_as()
         assert len(warn_calls) == 1
+
+
+# ---- PR 16: Combine PDFs slot ----------------------------------
+
+
+class TestOnCombine:
+    def test_no_op_when_dialog_cancelled(self, main_window, monkeypatch) -> None:
+        """Positive: dialog cancelled -> silent return, no file dialog."""
+
+        class _CancelDialog:
+            def __init__(self, parent=None):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Rejected
+
+        import pdfprism.ui.main_window as mw_mod
+
+        monkeypatch.setattr(mw_mod, "CombineDialog", _CancelDialog)
+
+        # If cancel path errors out, we\'d see an exception
+        main_window._on_combine()
+
+    def test_no_op_when_dialog_returns_zero_sources(self, main_window, monkeypatch) -> None:
+        """Positive: dialog accepted with < 2 sources -> silent return."""
+
+        class _EmptyAcceptDialog:
+            def __init__(self, parent=None):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            @property
+            def sources(self):
+                return []
+
+        import pdfprism.ui.main_window as mw_mod
+
+        monkeypatch.setattr(mw_mod, "CombineDialog", _EmptyAcceptDialog)
+
+        main_window._on_combine()
