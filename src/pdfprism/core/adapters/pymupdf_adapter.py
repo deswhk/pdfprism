@@ -1325,6 +1325,54 @@ class PyMuPDFAdapter:
                 result.append((page_index, (x0, y0, x1, y1), word))
         return result
 
+    def extract_images_with_bboxes(
+        self,
+    ) -> list[tuple[int, tuple[float, float, float, float], bytes]]:
+        """PR 17b: extract embedded images with their display bboxes.
+
+        Returns a flat list of ``(page_index, bbox, image_bytes)``
+        tuples for every embedded image occurrence. ``bbox`` is the
+        display rectangle in PDF coordinates; ``image_bytes`` are the
+        raw bytes of the image data (used for identity comparison via
+        hash).
+
+        If the same image xref appears on multiple pages, each
+        occurrence is listed separately (one tuple per placement).
+        Images without a resolvable display bbox are skipped (rare
+        edge case where PyMuPDF cannot determine the rect).
+
+        Raises:
+            DocumentClosedError: if no document is open.
+        """
+        self._require_open()
+        assert self._doc is not None
+        result: list[tuple[int, tuple[float, float, float, float], bytes]] = []
+        for page_index in range(self._doc.page_count):
+            page = self._doc[page_index]
+            for img_info in page.get_images(full=True):
+                xref = img_info[0]
+                try:
+                    bbox = page.get_image_bbox(img_info)
+                except Exception:
+                    # Rare: image with no visible placement on the page
+                    continue
+                if bbox is None or bbox.is_empty:
+                    continue
+                try:
+                    raw = self._doc.extract_image(xref)
+                except Exception:
+                    continue
+                if not raw or "image" not in raw:
+                    continue
+                result.append(
+                    (
+                        page_index,
+                        (bbox.x0, bbox.y0, bbox.x1, bbox.y1),
+                        raw["image"],
+                    )
+                )
+        return result
+
     def _reconcile_combined_groups(self, target_doc) -> int:
         """PR 16: apply last-source-wins reconciliation to combined doc.
 

@@ -56,3 +56,34 @@ class TestDiffView:
         assert view._diff.additions_count == 1
         assert view._diff.deletions_count == 1
         view.close_document()
+
+
+class TestDiffViewWithImages:
+    def _solid_png(self, r: int, g: int, b: int, size: int = 8) -> bytes:
+        import pymupdf
+
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.Rect(0, 0, size, size), False)
+        pix.set_rect(pix.irect, (r, g, b))
+        return pix.tobytes("png")
+
+    def _make_doc_with_image(self, tmp_path: Path, name: str, img_bytes: bytes) -> Path:
+        import pymupdf
+
+        path = tmp_path / name
+        d = pymupdf.open()
+        p = d.new_page(width=612, height=792)
+        p.insert_image(pymupdf.Rect(72, 100, 200, 200), stream=img_bytes)
+        d.save(str(path))
+        d.close()
+        return path
+
+    def test_reports_image_changes(self, qtbot, tmp_path: Path) -> None:
+        red = self._solid_png(255, 0, 0)
+        blue = self._solid_png(0, 0, 255)
+        p_a = self._make_doc_with_image(tmp_path, "a.pdf", red)
+        p_b = self._make_doc_with_image(tmp_path, "b.pdf", blue)
+        view = DiffView(p_a, p_b)
+        qtbot.addWidget(view)
+        assert view._diff.image_changes_count == 1
+        assert view._diff.image_diffs[0].kind == "replaced"
+        view.close_document()

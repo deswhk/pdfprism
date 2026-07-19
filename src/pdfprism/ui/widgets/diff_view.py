@@ -71,6 +71,7 @@ class DiffView(QWidget):
 
         # Track diff regions for prev/next navigation
         self._nav_index = -1
+        self._nav_items_index = -1
         self._syncing = False
 
         self._build_ui()
@@ -147,14 +148,22 @@ class DiffView(QWidget):
     def _format_stats(self) -> str:
         pages_a = len(self._diff.pages_touched_a)
         pages_b = len(self._diff.pages_touched_b)
-        return (
+        base = (
             f"{self._diff.additions_count} additions, "
             f"{self._diff.deletions_count} deletions "
             f"({pages_a} pages left, {pages_b} pages right)"
         )
+        if self._diff.image_changes_count > 0:
+            base += f", {self._diff.image_changes_count} image change(s)"
+        return base
 
     def _apply_highlights(self) -> None:
-        """Convert diff regions to per-page bbox lists for each pane."""
+        """Convert diff regions + image diffs to per-page bbox lists.
+
+        Text: red on left / green on right.
+        Images (PR 17b): magenta on the pane where the change is visible
+        (both panes for ``replaced``).
+        """
         left_bboxes: dict[int, list[tuple[float, float, float, float]]] = {}
         right_bboxes: dict[int, list[tuple[float, float, float, float]]] = {}
         for region in self._diff.regions:
@@ -166,6 +175,17 @@ class DiffView(QWidget):
                     right_bboxes.setdefault(w.page_index, []).append(w.bbox)
         self._left_pane.set_highlights(left_bboxes)
         self._right_pane.set_highlights(right_bboxes)
+
+        # PR 17b: image highlights
+        left_images: dict[int, list[tuple[float, float, float, float]]] = {}
+        right_images: dict[int, list[tuple[float, float, float, float]]] = {}
+        for idiff in self._diff.image_diffs:
+            if idiff.left is not None:
+                left_images.setdefault(idiff.left.page_index, []).append(idiff.left.bbox)
+            if idiff.right is not None:
+                right_images.setdefault(idiff.right.page_index, []).append(idiff.right.bbox)
+        self._left_pane.set_image_highlights(left_images)
+        self._right_pane.set_image_highlights(right_images)
 
     def _on_left_scrolled(self, value: int) -> None:
         if not self._sync_check.isChecked():
@@ -215,38 +235,101 @@ class DiffView(QWidget):
         """Return list of (index, region) for regions that are diffs."""
         return [(i, r) for i, r in enumerate(self._diff.regions) if r.kind != "equal"]
 
+    def _get_nav_items(self):
+        """PR 17b: unified nav list -- text regions + image diffs.
+
+        Returns list of (kind, item, sort_key) where:
+        - kind is "text" or "image"
+        - item is a DiffRegion (text) or ImageDiff (image)
+        - sort_key is (page_index, y_coord) for stable ordering
+        """
+        items = []
+        for _i, r in enumerate(self._diff.regions):
+            if r.kind == "equal":
+                continue
+            word = r.words_a[0] if r.words_a else (r.words_b[0] if r.words_b else None)
+            if word is None:
+                continue
+            sort_key = (word.page_index, word.bbox[1])
+            items.append(("text", r, sort_key))
+        for idiff in self._diff.image_diffs:
+            ref = idiff.left if idiff.left is not None else idiff.right
+            if ref is None:
+                continue
+            sort_key = (ref.page_index, ref.bbox[1])
+            items.append(("image", idiff, sort_key))
+        items.sort(key=lambda x: x[2])
+        return items
+
     def _on_prev_diff(self) -> None:
-        diffs = self._get_non_equal_regions()
-        if not diffs:
+        items = self._get_nav_items()
+        if not items:
             self._notify("No differences found")
             return
-        for i in reversed(range(len(diffs))):
-            if diffs[i][0] < self._nav_index or self._nav_index < 0:
-                self._nav_index = diffs[i][0]
-                self._scroll_to_region(diffs[i][1])
-                self._notify_position(i, len(diffs), diffs[i][1])
-                return
-        # Wrapped past start -- go to the last
-        last_i = len(diffs) - 1
-        self._nav_index = diffs[last_i][0]
-        self._scroll_to_region(diffs[last_i][1])
-        self._notify_position(last_i, len(diffs), diffs[last_i][1])
+        target_idx = self._nav_items_index - 1
+        if target_idx < 0:
+            target_idx = len(items) - 1  # wrap
+        self._nav_items_index = target_idx
+        kind, item, _ = items[target_idx]
+        self._nav_to_item(kind, item)
+        self._notify_nav_position(target_idx, len(items), kind, item)
 
     def _on_next_diff(self) -> None:
-        diffs = self._get_non_equal_regions()
-        if not diffs:
+        items = self._get_nav_items()
+        if not items:
             self._notify("No differences found")
             return
-        for i in range(len(diffs)):
-            if diffs[i][0] > self._nav_index:
-                self._nav_index = diffs[i][0]
-                self._scroll_to_region(diffs[i][1])
-                self._notify_position(i, len(diffs), diffs[i][1])
-                return
-        # Wrapped past end -- go back to the first
-        self._nav_index = diffs[0][0]
-        self._scroll_to_region(diffs[0][1])
-        self._notify_position(0, len(diffs), diffs[0][1])
+        target_idx = self._nav_items_index + 1
+        if target_idx >= len(items):
+            target_idx = 0  # wrap
+        self._nav_items_index = target_idx
+        kind, item, _ = items[target_idx]
+        self._nav_to_item(kind, item)
+        self._notify_nav_position(target_idx, len(items), kind, item)
+
+    def _nav_to_item(self, kind: str, item) -> None:
+        """PR 17b: dispatch nav to region or image handler."""
+        if kind == "text":
+            self._scroll_to_region(item)
+        elif kind == "image":
+            self._scroll_to_image_diff(item)
+
+    def _scroll_to_image_diff(self, idiff) -> None:
+        """Scroll to an image diff, highlighting on the relevant pane(s)."""
+        left_current: dict[int, list[tuple[float, float, float, float]]] = {}
+        right_current: dict[int, list[tuple[float, float, float, float]]] = {}
+        if idiff.left is not None:
+            left_current.setdefault(idiff.left.page_index, []).append(idiff.left.bbox)
+        if idiff.right is not None:
+            right_current.setdefault(idiff.right.page_index, []).append(idiff.right.bbox)
+        self._left_pane.set_current_highlights(left_current)
+        self._right_pane.set_current_highlights(right_current)
+
+        target = idiff.left if idiff.left is not None else idiff.right
+        pane = self._left_pane if idiff.left is not None else self._right_pane
+        if target is None:
+            return
+        y = 0
+        for pi, pix in enumerate(pane._base_pixmaps):
+            if pi >= target.page_index:
+                break
+            y += pix.height() + pane._layout.spacing()
+        y += int(target.bbox[1])
+        pane.verticalScrollBar().setValue(max(0, y - 40))
+
+    def _notify_nav_position(self, current: int, total: int, kind: str, item) -> None:
+        """PR 17b: unified nav notification for text + image diffs."""
+        if kind == "text":
+            label = {
+                "replace": "replace",
+                "insert": "insertion",
+                "delete": "deletion",
+            }.get(item.kind, item.kind)
+        elif kind == "image":
+            label = f"image {item.kind}"
+        else:
+            label = kind
+        self._notify(f"Diff {current + 1} of {total} ({label})")
 
     def _scroll_to_region(self, region) -> None:
         """Scroll both panes AND set current-diff highlights on both."""

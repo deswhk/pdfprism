@@ -113,3 +113,92 @@ class TestDiffDocuments:
             adapter_b.close()
         assert result.additions_count == 0
         assert result.deletions_count == 0
+
+
+def _solid_png(r: int, g: int, b: int, size: int = 8) -> bytes:
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.Rect(0, 0, size, size), False)
+    pix.set_rect(pix.irect, (r, g, b))
+    return pix.tobytes("png")
+
+
+def _make_doc_with_images(
+    tmp_path: Path,
+    name: str,
+    page_imgs: list[list[tuple[bytes, tuple[float, float, float, float]]]],
+) -> Path:
+    path = tmp_path / name
+    d = pymupdf.open()
+    for imgs in page_imgs:
+        page = d.new_page(width=612, height=792)
+        for img_bytes, bbox in imgs:
+            page.insert_image(pymupdf.Rect(*bbox), stream=img_bytes)
+    d.save(str(path))
+    d.close()
+    return path
+
+
+class TestDiffImages:
+    def test_identical_images(self, tmp_path: Path) -> None:
+        red = _solid_png(255, 0, 0)
+        p_a = _make_doc_with_images(tmp_path, "a.pdf", [[(red, (72, 100, 200, 200))]])
+        p_b = _make_doc_with_images(tmp_path, "b.pdf", [[(red, (72, 100, 200, 200))]])
+        adapter_a = PyMuPDFAdapter()
+        adapter_a.open(p_a)
+        adapter_b = PyMuPDFAdapter()
+        adapter_b.open(p_b)
+        try:
+            result = DiffService().diff_documents(adapter_a, adapter_b)
+        finally:
+            adapter_a.close()
+            adapter_b.close()
+        assert result.image_changes_count == 0
+
+    def test_replaced_at_same_position(self, tmp_path: Path) -> None:
+        red = _solid_png(255, 0, 0)
+        blue = _solid_png(0, 0, 255)
+        p_a = _make_doc_with_images(tmp_path, "a.pdf", [[(red, (72, 100, 200, 200))]])
+        p_b = _make_doc_with_images(tmp_path, "b.pdf", [[(blue, (72, 100, 200, 200))]])
+        adapter_a = PyMuPDFAdapter()
+        adapter_a.open(p_a)
+        adapter_b = PyMuPDFAdapter()
+        adapter_b.open(p_b)
+        try:
+            result = DiffService().diff_documents(adapter_a, adapter_b)
+        finally:
+            adapter_a.close()
+            adapter_b.close()
+        assert result.image_changes_count == 1
+        assert len(result.image_diffs) == 1
+        assert result.image_diffs[0].kind == "replaced"
+
+    def test_image_only_in_a(self, tmp_path: Path) -> None:
+        red = _solid_png(255, 0, 0)
+        p_a = _make_doc_with_images(tmp_path, "a.pdf", [[(red, (72, 100, 200, 200))]])
+        p_b = _make_doc_with_images(tmp_path, "b.pdf", [[]])
+        adapter_a = PyMuPDFAdapter()
+        adapter_a.open(p_a)
+        adapter_b = PyMuPDFAdapter()
+        adapter_b.open(p_b)
+        try:
+            result = DiffService().diff_documents(adapter_a, adapter_b)
+        finally:
+            adapter_a.close()
+            adapter_b.close()
+        assert result.image_changes_count == 1
+        assert result.image_diffs[0].kind == "removed"
+
+    def test_image_only_in_b(self, tmp_path: Path) -> None:
+        red = _solid_png(255, 0, 0)
+        p_a = _make_doc_with_images(tmp_path, "a.pdf", [[]])
+        p_b = _make_doc_with_images(tmp_path, "b.pdf", [[(red, (72, 100, 200, 200))]])
+        adapter_a = PyMuPDFAdapter()
+        adapter_a.open(p_a)
+        adapter_b = PyMuPDFAdapter()
+        adapter_b.open(p_b)
+        try:
+            result = DiffService().diff_documents(adapter_a, adapter_b)
+        finally:
+            adapter_a.close()
+            adapter_b.close()
+        assert result.image_changes_count == 1
+        assert result.image_diffs[0].kind == "added"
