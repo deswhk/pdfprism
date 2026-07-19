@@ -3207,3 +3207,50 @@ class TestOnCombine:
         monkeypatch.setattr(mw_mod, "CombineDialog", _EmptyAcceptDialog)
 
         main_window._on_combine()
+
+
+# ---- PR 17a: Compare PDFs slot ---------------------------------
+
+
+class TestOnCompare:
+    def test_no_op_when_cancelled(self, main_window, monkeypatch) -> None:
+        """Positive: dialog cancelled -> silent return."""
+
+        class _CancelDialog:
+            def __init__(self, parent=None, open_tab_paths=None, default_left_path=None):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Rejected
+
+        import pdfprism.ui.main_window as mw_mod
+
+        monkeypatch.setattr(mw_mod, "CompareDialog", _CancelDialog)
+        main_window._on_compare()
+
+    def test_no_op_with_missing_paths(self, main_window, monkeypatch) -> None:
+        """Positive: dialog accepted but paths missing -> silent return."""
+
+        class _MissingPathsDialog:
+            def __init__(self, parent=None, open_tab_paths=None, default_left_path=None):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            @property
+            def left_path(self):
+                return None
+
+            @property
+            def right_path(self):
+                return None
+
+        import pdfprism.ui.main_window as mw_mod
+
+        monkeypatch.setattr(mw_mod, "CompareDialog", _MissingPathsDialog)
+        main_window._on_compare()

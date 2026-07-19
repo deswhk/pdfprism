@@ -40,6 +40,7 @@ from pdfprism.services.redaction import RedactionService
 from pdfprism.services.search import SearchScope, SearchService
 from pdfprism.ui.dialogs.about import AboutDialog
 from pdfprism.ui.dialogs.combine import CombineDialog
+from pdfprism.ui.dialogs.compare import CompareDialog
 from pdfprism.ui.dialogs.compression import CompressionDialog
 from pdfprism.ui.dialogs.crop import CropDialog
 from pdfprism.ui.dialogs.crypt import CryptDialog
@@ -55,6 +56,7 @@ from pdfprism.ui.dialogs.redaction_options import RedactionOptionsDialog
 from pdfprism.ui.dialogs.search_redact import SearchRedactDialog
 from pdfprism.ui.dialogs.split import SplitDialog
 from pdfprism.ui.theme import DARK_QSS
+from pdfprism.ui.widgets.diff_view import DiffView
 from pdfprism.ui.widgets.document_view import DocumentView
 from pdfprism.ui.widgets.page_view import ToolMode, ViewMode
 from pdfprism.ui.widgets.search_bar import SearchBar
@@ -238,6 +240,12 @@ class MainWindow(QMainWindow):
         self.act_combine.triggered.connect(self._on_combine)
         self.act_combine.setEnabled(True)
         self.act_combine.setToolTip("Combine multiple PDFs into a single new document")
+
+        # PR 17a: Compare PDFs
+        self.act_compare = QAction("Co&mpare PDFs...", self)
+        self.act_compare.triggered.connect(self._on_compare)
+        self.act_compare.setEnabled(True)
+        self.act_compare.setToolTip("Compare two PDFs and highlight text differences")
 
         self.act_close_doc = QAction("&Close Tab", self)
         self.act_close_doc.setShortcut(QKeySequence.StandardKey.Close)
@@ -569,6 +577,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_save_compressed_as)
         file_menu.addSeparator()
         file_menu.addAction(self.act_combine)
+        file_menu.addAction(self.act_compare)
         file_menu.addSeparator()
         file_menu.addAction(self.act_close_doc)
         extract_menu = file_menu.addMenu("&Extract")
@@ -690,7 +699,8 @@ class MainWindow(QMainWindow):
 
     def _on_tab_close_requested(self, index: int) -> None:
         doc_view = self._tab_widget.widget(index)
-        if not isinstance(doc_view, DocumentView):
+        # PR 17a: accept both DocumentView and DiffView tabs.
+        if not isinstance(doc_view, (DocumentView, DiffView)):
             return
         if doc_view.is_modified and not self._prompt_unsaved_changes(doc_view):
             return
@@ -699,13 +709,16 @@ class MainWindow(QMainWindow):
         # try to remap.
         if self._cross_search_results:
             self._clear_cross_search()
-        self._thumbnail_stack.removeWidget(doc_view.thumbnail_panel)
-        self._outline_stack.removeWidget(doc_view.outline_panel)
-        self._organize_stack.removeWidget(doc_view.organize_panel)
+        # PR 17a: DiffView doesn't own the thumbnail, outline, or organize panels.
+        if isinstance(doc_view, DocumentView):
+            self._thumbnail_stack.removeWidget(doc_view.thumbnail_panel)
+            self._outline_stack.removeWidget(doc_view.outline_panel)
+            self._organize_stack.removeWidget(doc_view.organize_panel)
         self._tab_widget.removeTab(index)
         doc_view.close_document()
-        doc_view.thumbnail_panel.deleteLater()
-        doc_view.outline_panel.deleteLater()
+        if isinstance(doc_view, DocumentView):
+            doc_view.thumbnail_panel.deleteLater()
+            doc_view.outline_panel.deleteLater()
         doc_view.deleteLater()
         if self._tab_widget.count() == 0:
             self._enter_empty_state()
@@ -732,8 +745,26 @@ class MainWindow(QMainWindow):
             return
 
         doc_view = self._tab_widget.widget(index)
+        # PR 17a: DiffView tabs need different handling -- they have no
+        # doc-view state to bind and the status-bar page/zoom/tool
+        # indicators are meaningless (DiffView-active).
+        if isinstance(doc_view, DiffView):
+            self._active_tab = None
+            self._stacked_central.setCurrentIndex(1)
+            self._page_indicator.setVisible(False)
+            self._zoom_indicator.setVisible(False)
+            self._tool_indicator.setVisible(False)
+            self.setWindowTitle(f"pdfprism - Compare: {doc_view.path.name}")
+            self._update_actions_enabled()
+            self._refresh_save_actions()
+            return
         if not isinstance(doc_view, DocumentView):
             return
+        # Coming back to a DocumentView -- ensure status-bar indicators
+        # are visible again.
+        self._page_indicator.setVisible(True)
+        self._zoom_indicator.setVisible(True)
+        self._tool_indicator.setVisible(True)
 
         self._active_tab = doc_view
         self._stacked_central.setCurrentIndex(1)
@@ -2116,6 +2147,59 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(
             f"Combined {len(sources)} PDFs -> {target.name} ({page_count} pages)",
+            8000,
+        )
+
+    def _on_compare(self) -> None:
+        """PR 17a: prompt for two PDFs, open a DiffView tab with the result.
+
+        Flow: enumerate open tabs (DocumentView only) -> CompareDialog
+        picks two paths (from open tabs or external files) -> construct
+        DiffView (which opens both docs + runs diff) -> add as a new tab.
+        """
+        # Collect open document paths
+        open_paths: list[Path] = []
+        for i in range(self._tab_widget.count()):
+            widget = self._tab_widget.widget(i)
+            if isinstance(widget, DocumentView):
+                open_paths.append(widget.path)
+
+        # Default left path to active tab if it's a DocumentView
+        default_left = None
+        active = self._active_tab
+        if active is not None:
+            default_left = active.path
+
+        dlg = CompareDialog(
+            parent=self,
+            open_tab_paths=open_paths,
+            default_left_path=default_left,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        left_path = dlg.left_path
+        right_path = dlg.right_path
+        if left_path is None or right_path is None:
+            return
+
+        # Construct DiffView (may raise if a doc fails to open)
+        try:
+            diff_view = DiffView(left_path, right_path, parent=self)
+        except Exception as exc:
+            QMessageBox.critical(self, "Compare Failed", str(exc))
+            return
+
+        # Add as a tab
+        tab_title = f"Compare: {left_path.name} vs {right_path.name}"
+        tab_idx = self._tab_widget.addTab(diff_view, tab_title)
+        self._tab_widget.setTabToolTip(tab_idx, f"{left_path}\nvs\n{right_path}")
+        self._tab_widget.setCurrentIndex(tab_idx)
+        self._stacked_central.setCurrentIndex(1)
+
+        self.statusBar().showMessage(
+            f"Compared {left_path.name} vs {right_path.name}: "
+            f"{diff_view._diff.additions_count} additions, "
+            f"{diff_view._diff.deletions_count} deletions",
             8000,
         )
 

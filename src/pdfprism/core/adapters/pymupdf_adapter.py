@@ -1293,6 +1293,38 @@ class PyMuPDFAdapter:
         )
         return page_count
 
+    def extract_words_with_boxes(
+        self,
+    ) -> list[tuple[int, tuple[float, float, float, float], str]]:
+        """PR 17a: extract all words with bounding boxes for diff.
+
+        Returns a flat list of ``(page_index, bbox, word)`` tuples
+        in document reading order. Each ``bbox`` is a ``(x0, y0, x1, y1)``
+        rectangle in PDF coordinates.
+
+        Uses PyMuPDF's ``page.get_text("words")`` which returns
+        ``(x0, y0, x1, y1, word, block_no, line_no, word_no)`` tuples.
+        We drop the block/line/word indices -- the caller only needs
+        the bbox for highlight rendering.
+
+        Whitespace-only "words" are excluded. Case and punctuation
+        are preserved as-is; the diff caller decides normalization.
+
+        Raises:
+            DocumentClosedError: if no document is open.
+        """
+        self._require_open()
+        assert self._doc is not None
+        result: list[tuple[int, tuple[float, float, float, float], str]] = []
+        for page_index in range(self._doc.page_count):
+            page = self._doc[page_index]
+            for word_tuple in page.get_text("words"):
+                x0, y0, x1, y1, word = word_tuple[:5]
+                if not word or not word.strip():
+                    continue
+                result.append((page_index, (x0, y0, x1, y1), word))
+        return result
+
     def _reconcile_combined_groups(self, target_doc) -> int:
         """PR 16: apply last-source-wins reconciliation to combined doc.
 
