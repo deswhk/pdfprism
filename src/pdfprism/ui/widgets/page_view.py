@@ -379,6 +379,25 @@ class PageView(QGraphicsView):
             self._current_page = new_current
             self.page_changed.emit(new_current)
 
+    def _page_at_scene_y(self, y: float) -> int:
+        """PR 17.6: return the page_index whose vertical range contains ``y``.
+
+        Uses ``_page_offsets`` (scene-y of each page's top) to find the
+        page. If ``y`` is above page 0 or below the last page, clamps
+        to the nearest page. Returns -1 only if there are no pages
+        (``_page_offsets`` is empty).
+        """
+        if not self._page_offsets:
+            return -1
+        # Walk offsets to find the last one whose top is <= y.
+        # Same shape as _on_scroll but returns the page instead of updating state.
+        found = 0
+        for i, offset in enumerate(self._page_offsets):
+            if offset > y:
+                break
+            found = i
+        return found
+
     def _refresh_highlights(self) -> None:
         self._clear_highlight_items()
         if not self._pixmap_items:
@@ -592,21 +611,46 @@ class PageView(QGraphicsView):
             self._scene.removeItem(self._redaction_temp_item)
             self._redaction_temp_item = None
 
-        if self._view_mode != ViewMode.SINGLE_PAGE:
-            return
         if self._page_count == 0:
             return
         w = abs(anchor.x() - current.x())
         h = abs(anchor.y() - current.y())
         if w < 5 or h < 5:
             return
-        # Convert scene -> page-space (PDF points). Scene is
-        # rendered at _RENDER_SCALE, so divide.
+
+        # PR 17.6: continuous-mode drag support. In single-page mode the
+        # scene contains only the current page, so scene coords == page
+        # coords (modulo _RENDER_SCALE). In continuous mode we need to
+        # (a) identify which page the drag ANCHORED on (that's the page
+        # the mark belongs to), (b) subtract the page's scene y-offset
+        # to get page-local coords, and (c) clamp the drag END to that
+        # page's bounds so drags spanning multiple pages stay on the
+        # starting page.
+        if self._view_mode == ViewMode.SINGLE_PAGE:
+            target_page = self._current_page
+            y_offset = 0.0
+            page_bottom_scene = float("inf")
+        else:
+            target_page = self._page_at_scene_y(anchor.y())
+            if not (0 <= target_page < len(self._page_offsets)):
+                return
+            y_offset = self._page_offsets[target_page]
+            if target_page < len(self._pixmap_items):
+                pixmap_h = float(self._pixmap_items[target_page].boundingRect().height())
+                page_bottom_scene = y_offset + pixmap_h
+            else:
+                page_bottom_scene = float("inf")
+
+        # Clamp current.y() to the starting page's scene-y range.
+        current_y_clamped = min(max(current.y(), y_offset), page_bottom_scene)
+
+        # Convert scene -> page-space (PDF points). Scene is rendered
+        # at _RENDER_SCALE, so divide.
         x0 = min(anchor.x(), current.x()) / _RENDER_SCALE
-        y0 = min(anchor.y(), current.y()) / _RENDER_SCALE
+        y0 = (min(anchor.y(), current_y_clamped) - y_offset) / _RENDER_SCALE
         x1 = max(anchor.x(), current.x()) / _RENDER_SCALE
-        y1 = max(anchor.y(), current.y()) / _RENDER_SCALE
-        self.redaction_requested.emit(self._current_page, (x0, y0, x1, y1))
+        y1 = (max(anchor.y(), current_y_clamped) - y_offset) / _RENDER_SCALE
+        self.redaction_requested.emit(target_page, (x0, y0, x1, y1))
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         # PR 12: Escape cancels a pending redaction drag.
@@ -681,11 +725,20 @@ class PageView(QGraphicsView):
         adapter = self._page_cache.adapter
         if adapter is None or self._page_count == 0:
             return None
-        if self._view_mode != ViewMode.SINGLE_PAGE:
-            return None
-        # Page-space point
+        # PR 17.6: identify the page under the click. Single-page: current.
+        # Continuous: derive from scene y via _page_at_scene_y.
+        if self._view_mode == ViewMode.SINGLE_PAGE:
+            target_page = self._current_page
+            y_offset = 0.0
+        else:
+            target_page = self._page_at_scene_y(scene_pos.y())
+            if not (0 <= target_page < len(self._page_offsets)):
+                return None
+            y_offset = self._page_offsets[target_page]
+
+        # Page-space point (subtract page's scene y-offset first)
         px = scene_pos.x() / _RENDER_SCALE
-        py = scene_pos.y() / _RENDER_SCALE
+        py = (scene_pos.y() - y_offset) / _RENDER_SCALE
         # Walk pending marks on the current page
         try:
             all_marks = adapter.list_redactions()
@@ -694,7 +747,7 @@ class PageView(QGraphicsView):
         # Filter to current page + assign 0-based per-page indices
         page_marks: list[tuple[int, tuple[float, float, float, float]]] = []
         for r in all_marks:
-            if r.page_index != self._current_page:
+            if r.page_index != target_page:
                 continue
             page_marks.append((len(page_marks), r.rect))
         if not page_marks:
@@ -702,7 +755,7 @@ class PageView(QGraphicsView):
         # Reverse-iterate to prefer the last-added mark on overlap.
         for local_index, (x0, y0, x1, y1) in reversed(page_marks):
             if x0 <= px <= x1 and y0 <= py <= y1:
-                return (self._current_page, local_index)
+                return (target_page, local_index)
         return None
 
     def _resolve_group_size_for_hit(self, page_index: int, redaction_index: int) -> int:
