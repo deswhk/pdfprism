@@ -2139,3 +2139,152 @@ class TestSaveCompressed:
         finally:
             adapter._doc.close()
             adapter._doc = None
+
+
+# ---- PR 16: combine_documents + reconcile ------------------------
+
+
+class TestCombineDocuments:
+    def _make_source(self, tmp_path: Path, name: str, page_texts: list[str]) -> Path:
+        """Create a source PDF with the given per-page texts, return path."""
+        import pymupdf
+
+        path = tmp_path / name
+        d = pymupdf.open()
+        for text in page_texts:
+            page = d.new_page(width=612, height=792)
+            page.insert_text((72, 100), text, fontsize=14)
+        d.save(str(path))
+        d.close()
+        return path
+
+    def test_combines_two_docs(self, tmp_path: Path) -> None:
+        """Positive: two sources concatenate in order with correct page count."""
+        src_a = self._make_source(tmp_path, "a.pdf", ["A1", "A2"])
+        src_b = self._make_source(tmp_path, "b.pdf", ["B1", "B2", "B3"])
+        output = tmp_path / "combined.pdf"
+
+        adapter = PyMuPDFAdapter()
+        page_count = adapter.combine_documents([src_a, src_b], output)
+        assert page_count == 5
+
+    def test_empty_sources_raises(self, tmp_path: Path) -> None:
+        """Negative: no sources raises DocumentSaveError."""
+        from pdfprism.core.exceptions import DocumentSaveError
+
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(DocumentSaveError):
+            adapter.combine_documents([], tmp_path / "out.pdf")
+
+    def test_missing_source_raises(self, tmp_path: Path) -> None:
+        """Negative: source path does not exist raises DocumentSaveError."""
+        from pdfprism.core.exceptions import DocumentSaveError
+
+        adapter = PyMuPDFAdapter()
+        with pytest.raises(DocumentSaveError):
+            adapter.combine_documents(
+                [tmp_path / "nonexistent.pdf"],
+                tmp_path / "out.pdf",
+            )
+
+    def test_progress_callback_fires(self, tmp_path: Path) -> None:
+        """Positive: callback fires per source and at completion."""
+        src_a = self._make_source(tmp_path, "a.pdf", ["A"])
+        src_b = self._make_source(tmp_path, "b.pdf", ["B"])
+        output = tmp_path / "combined.pdf"
+
+        adapter = PyMuPDFAdapter()
+        calls: list = []
+
+        def cb(current, total):
+            calls.append((current, total))
+
+        adapter.combine_documents([src_a, src_b], output, progress_callback=cb)
+        # Should include at least start-of-each and completion.
+        assert len(calls) >= 2
+        assert calls[-1] == (2, 2)
+
+
+class TestReconcileCombinedGroups:
+    def _make_source_with_redaction(
+        self,
+        tmp_path: Path,
+        name: str,
+        target_text: str,
+        fill_color: tuple[int, int, int],
+        replacement_text: str | None,
+    ) -> Path:
+        """Create a PDF with target_text on page 0 + a redaction on it."""
+        import pymupdf
+
+        from pdfprism.core.types import Redaction
+
+        path = tmp_path / name
+        d = pymupdf.open()
+        page = d.new_page(width=612, height=792)
+        page.insert_text((72, 150), target_text, fontsize=14)
+        d.save(str(path))
+        d.close()
+
+        adapter = PyMuPDFAdapter()
+        adapter.open(path)
+        adapter.add_redaction(
+            Redaction(
+                page_index=0,
+                rect=(70, 145, 135, 165),
+                fill_color=fill_color,
+                replacement_text=replacement_text,
+            )
+        )
+        adapter.save(path)
+        adapter.close()
+        return path
+
+    def test_last_source_wins_on_style_collision(self, tmp_path: Path) -> None:
+        """Positive: divergent-style group reconciled to last source's values."""
+        src_a = self._make_source_with_redaction(
+            tmp_path, "a.pdf", "John Smith", (255, 0, 0), "[NAME-A]"
+        )
+        src_b = self._make_source_with_redaction(
+            tmp_path, "b.pdf", "John Smith", (0, 255, 0), "[NAME-B]"
+        )
+        output = tmp_path / "combined.pdf"
+
+        adapter = PyMuPDFAdapter()
+        adapter.combine_documents([src_a, src_b], output)
+
+        # Reopen and verify: single group, both marks have B's styling
+        verify = PyMuPDFAdapter()
+        verify.open(output)
+        groups = verify.list_redactions_grouped()
+        try:
+            assert len(groups) == 1
+            for m in groups[0].marks:
+                assert m.fill_color == (0, 255, 0)
+                assert m.replacement_text == "[NAME-B]"
+        finally:
+            verify.close()
+
+    def test_uniform_group_no_reconciliation(self, tmp_path: Path) -> None:
+        """Positive: groups with matching styles are not modified."""
+        src_a = self._make_source_with_redaction(
+            tmp_path, "a.pdf", "John Smith", (255, 0, 0), "[X]"
+        )
+        src_b = self._make_source_with_redaction(
+            tmp_path, "b.pdf", "John Smith", (255, 0, 0), "[X]"
+        )
+        output = tmp_path / "combined.pdf"
+
+        adapter = PyMuPDFAdapter()
+        adapter.combine_documents([src_a, src_b], output)
+
+        verify = PyMuPDFAdapter()
+        verify.open(output)
+        groups = verify.list_redactions_grouped()
+        try:
+            assert len(groups) == 1
+            for m in groups[0].marks:
+                assert m.fill_color == (255, 0, 0)
+                assert m.replacement_text == "[X]"
+        finally:
+            verify.close()

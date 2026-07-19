@@ -1165,6 +1165,244 @@ class PyMuPDFAdapter:
         )
         return (original_size, compressed_size)
 
+    def combine_documents(
+        self,
+        sources: list[Path],
+        output_path: Path,
+        *,
+        progress_callback=None,
+    ) -> int:
+        """PR 16: combine multiple PDFs into a new document.
+
+        Concatenates ``sources`` in order using ``pymupdf.Document.insert_pdf``.
+        Each source contributes a contiguous run of pages to the output; the
+        first source's pages become the target's pages 0..N_1-1, the second
+        source's become pages N_1..N_1+N_2-1, and so on. Annotations (including
+        pending redaction marks) are preserved by PyMuPDF's copy pipeline.
+
+        Style collision resolution across pending redactions from different
+        sources is applied by ``_reconcile_combined_groups`` (sub-step 4);
+        this sub-step is the plain concat.
+
+        Args:
+            sources: paths to PDFs to concatenate, in order.
+            output_path: destination file path.
+            progress_callback: optional ``callable(current, total)``
+                where current is the number of sources processed so
+                far and total is len(sources).
+
+        Returns:
+            total page count of the combined document.
+
+        Raises:
+            DocumentSaveError: on any I/O or PyMuPDF failure.
+        """
+        if not sources:
+            raise DocumentSaveError("Cannot combine: no sources provided")
+
+        target = pymupdf.open()
+        try:
+            total = len(sources)
+            for idx, source_path in enumerate(sources):
+                if progress_callback is not None:
+                    try:
+                        progress_callback(idx, total)
+                    except Exception:
+                        pass
+                if not source_path.exists():
+                    raise DocumentSaveError(f"Cannot combine: source does not exist: {source_path}")
+                try:
+                    source_doc = pymupdf.open(str(source_path))
+                except Exception as exc:
+                    raise DocumentSaveError(f"Cannot open source {source_path}: {exc}") from exc
+                try:
+                    if source_doc.needs_pass:
+                        msg = (
+                            "Cannot combine encrypted source without "
+                            f"decryption first: {source_path}"
+                        )
+                        raise DocumentSaveError(msg)
+                    target.insert_pdf(source_doc)
+                finally:
+                    source_doc.close()
+            # Fire final progress
+            if progress_callback is not None:
+                try:
+                    progress_callback(total, total)
+                except Exception:
+                    pass
+            page_count = target.page_count
+            try:
+                target.save(
+                    str(output_path),
+                    garbage=4,
+                    deflate=True,
+                    clean=True,
+                )
+            except (OSError, RuntimeError) as exc:
+                raise DocumentSaveError(f"Combine save failed: {exc}") from exc
+        finally:
+            target.close()
+
+        # PR 16: reopen the saved file and reconcile style collisions
+        # across pending redaction groups per the locked last-source-wins
+        # rule. Cannot happen before first save because PyMuPDF's
+        # annotation iterator does not surface annots from non-first
+        # insert_pdf calls until the doc is flattened.
+        try:
+            reopened = pymupdf.open(str(output_path))
+        except Exception as exc:
+            raise DocumentSaveError(
+                f"Cannot reopen combined doc for reconciliation: {exc}"
+            ) from exc
+        try:
+            reconciled = self._reconcile_combined_groups(reopened)
+            if reconciled > 0:
+                # PyMuPDF disallows non-incremental save to the source
+                # path, so we write to a temp path and rename. This
+                # gives us full-rewrite semantics (no stale annotation
+                # data left behind).
+                temp_path = output_path.with_name(
+                    output_path.stem + ".reconciling" + output_path.suffix
+                )
+                try:
+                    reopened.save(
+                        str(temp_path),
+                        garbage=4,
+                        deflate=True,
+                        clean=True,
+                    )
+                except (OSError, RuntimeError) as exc:
+                    raise DocumentSaveError(f"Reconciled save failed: {exc}") from exc
+                # Close before rename so the OS releases the file handle.
+                reopened.close()
+                try:
+                    temp_path.replace(output_path)
+                except OSError as exc:
+                    raise DocumentSaveError(f"Reconciled swap failed: {exc}") from exc
+                return page_count
+        finally:
+            if not reopened.is_closed:
+                reopened.close()
+
+        logger.info(
+            "Combined %d source(s) into %s (%d pages)",
+            len(sources),
+            output_path.name,
+            page_count,
+        )
+        return page_count
+
+    def _reconcile_combined_groups(self, target_doc) -> int:
+        """PR 16: apply last-source-wins reconciliation to combined doc.
+
+        After concat, groups may contain marks with divergent styling
+        (e.g. source A had "John Smith" red, source B had "John Smith"
+        green). Our design principle is group-atomic: all marks in a
+        group share styling by design. So we reconcile: for each group
+        with divergent marks, adopt the styling of the mark with the
+        highest page_index (which comes from the latest source by
+        construction, since insert_pdf appends pages in order).
+
+        Session Global values are not needed for reconciliation --
+        we don't care about the Custom/Global label at this point,
+        only the actual stored fill/text. Callers determine label
+        later via ``list_redactions_grouped`` with their own session
+        values.
+
+        The reconciliation operates on ``target_doc`` directly (a
+        ``pymupdf.Document``), not on the adapter's ``self._doc``,
+        because Combine builds a fresh output doc that never becomes
+        the adapter's current document.
+
+        Returns the number of groups that were reconciled (0 if none
+        had divergent styling).
+        """
+        # Group by normalized extracted text using local helpers.
+        # We do not use self.list_redactions_grouped here because
+        # target_doc is not self._doc.
+        groups: dict[str, list] = {}
+        for page_index in range(target_doc.page_count):
+            page = target_doc[page_index]
+            for annot in page.annots(types=[pymupdf.PDF_ANNOT_REDACT]):
+                rect = annot.rect
+                text = page.get_textbox(rect) or ""
+                normalized = self._normalize_group_text(text)
+                if not normalized:
+                    # Region-based singleton -- unique per (page, rect),
+                    # so no collision possible. Skip.
+                    continue
+                # Read this mark's fill/text
+                fill_color = (0, 0, 0)
+                if annot.colors and annot.colors.get("fill"):
+                    fill = annot.colors["fill"]
+                    fill_color = tuple(int(round(c * 255)) for c in fill)
+                replacement_text = annot.info.get("content") or None
+                groups.setdefault(normalized, []).append(
+                    {
+                        "page_index": page_index,
+                        "rect": (rect.x0, rect.y0, rect.x1, rect.y1),
+                        "fill_color": fill_color,
+                        "replacement_text": replacement_text,
+                    }
+                )
+
+        reconciled = 0
+        for normalized_text, marks in groups.items():
+            if len(marks) < 2:
+                continue  # singleton -- no collision possible
+            # Find distinct styles in this group
+            styles = {(m["fill_color"], m["replacement_text"]) for m in marks}
+            if len(styles) < 2:
+                continue  # already uniform -- no reconciliation needed
+            # Divergent styling. Pick the mark with highest page_index
+            # -- that's from the latest source.
+            winner = max(marks, key=lambda m: m["page_index"])
+            winning_fill = winner["fill_color"]
+            winning_text = winner["replacement_text"]
+            # Apply to every mark in the group. We use delete+recreate
+            # (matches update_redaction_group semantics) so text updates
+            # take effect on the underlying OverlayText.
+            fill_float = tuple(c / 255.0 for c in winning_fill)
+            for page_index in range(target_doc.page_count):
+                page = target_doc[page_index]
+                to_recreate: list[tuple[float, float, float, float]] = []
+                for annot in page.annots(types=[pymupdf.PDF_ANNOT_REDACT]):
+                    rect = annot.rect
+                    text = page.get_textbox(rect) or ""
+                    if self._normalize_group_text(text) != normalized_text:
+                        continue
+                    to_recreate.append((rect.x0, rect.y0, rect.x1, rect.y1))
+                # Delete matching, then re-add with winning values
+                for annot in list(page.annots(types=[pymupdf.PDF_ANNOT_REDACT])):
+                    rt = (
+                        annot.rect.x0,
+                        annot.rect.y0,
+                        annot.rect.x1,
+                        annot.rect.y1,
+                    )
+                    if rt in to_recreate:
+                        page.delete_annot(annot)
+                for rt in to_recreate:
+                    rect = pymupdf.Rect(*rt)
+                    kwargs: dict = {"fill": fill_float, "cross_out": True}
+                    if winning_text is not None:
+                        kwargs["text"] = winning_text
+                    new_annot = page.add_redact_annot(rect, **kwargs)
+                    if winning_text is not None:
+                        info = new_annot.info
+                        info["content"] = winning_text
+                        new_annot.set_info(info)
+                        new_annot.update()
+            reconciled += 1
+
+        if reconciled > 0:
+            logger.info(
+                "Reconciled %d group(s) with divergent styling (last-source-wins)",
+                reconciled,
+            )
+        return reconciled
+
     def _recompress_embedded_images(
         self,
         *,
