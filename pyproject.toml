@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "pdfprism"
-version = "0.2.0"
+version = "0.3.0"
 description = "A PDF reader and editor built on PyMuPDF and PySide6"
 readme = "README.md"
 requires-python = ">=3.13"

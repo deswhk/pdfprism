@@ -6,9 +6,9 @@ A prism decomposes light into its components; pdfprism decomposes PDFs into thei
 
 ## Status
 
-Under active development. Milestones 1–4 shipped, including the full redaction bundle (PR 12 plus PR 12.1–12.5). Milestone 5 (per-mark redaction customization) and Milestone 7 (packaging as standalone Windows app) are the next active tracks. OCR is on the backlog rather than the roadmap. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
+Under active development. Milestones 1-6 shipped, including the full redaction workflow (per-mark customization, group operations, and the Manage Marks review dialog), compression, multi-source combine, and side-by-side text + image diff. Milestone 7 (packaging as a standalone Windows app) is the next active track. OCR is on the backlog rather than the roadmap. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full roadmap.
 
-**What works today (through PR 12):**
+**What works today (through PR 17b, v0.3.0):**
 
 - Open and view PDFs, with pan, scroll, and Acrobat-style zoom (fit page, fit width, actual size, custom %)
 - Two view modes: single page (one page at a time) and continuous (vertical scroll through every page)
@@ -35,7 +35,7 @@ Under active development. Milestones 1–4 shipped, including the full redaction
 - Cross-document page operations via the new File → Pages submenu: Extract Pages to File (save a page range as a new PDF), Insert Pages from File (insert a range from another PDF at a chosen position), Split Document (every N pages or at specified page boundaries, with zero-padded output names), and Merge Documents (pick from open tabs with reorder, opens the result as a new tab)
 - Organize Pages panel (View → Toggle Organize Pages or F6): dockable grid view of all pages with multi-select (Ctrl/Shift), drag-to-reorder, and selection-aware operations (Rotate Right/Left/180°, Delete, Duplicate, Crop Selection, Extract Selection to File) via toolbar, context menu, or keyboard shortcuts (Ctrl+R, Delete, Ctrl+D, Ctrl+A, Ctrl+E). The Crop dialog now includes a live rendered preview of the page with the crop rectangle drawn over it, updating as you type. Hidden by default; persisted across sessions.
 
-**Coming next:** Milestone 4 wraps up with PR 13 (OCR via Tesseract). PR 11.5 (permissions dialog with owner/user password distinction) and PR 12.1-12.3 (text-selection redact, search-redact, redaction options) are deferred pending concrete user demand.
+**Coming next:** Milestone 7 -- packaging pdfprism as a standalone Windows application (PyInstaller + Inno Setup + SignPath.io code signing) so users don't need to install Python. On the backlog for after that: PR 11.5 (permissions dialog with owner/user password distinction), PR 13 (OCR via Tesseract), rotated-text redaction, match preview and regex search, cross-tab search UI, image / text-file combine input, and layout-aware diff (move detection, page reorder recognition).
 
 ## Scope
 
