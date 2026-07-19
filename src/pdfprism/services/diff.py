@@ -21,6 +21,7 @@ future PR.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Literal
@@ -61,6 +62,36 @@ class DiffRegion:
 
 
 @dataclass
+class ImageRef:
+    """An embedded image located in a source document.
+
+    ``bbox`` is (x0, y0, x1, y1) in PDF coordinates on the source page.
+    ``image_hash`` is the MD5 hex digest of the raw image bytes,
+    used for identity comparison.
+    """
+
+    page_index: int
+    bbox: tuple[float, float, float, float]
+    image_hash: str
+
+
+@dataclass
+class ImageDiff:
+    """A detected image change between two documents.
+
+    - ``kind=added``: image in B has no match in A
+    - ``kind=removed``: image in A has no match in B
+    - ``kind=replaced``: matched pair with differing bytes
+
+    ``left`` is None for "added"; ``right`` is None for "removed".
+    """
+
+    kind: Literal["added", "removed", "replaced"]
+    left: ImageRef | None = None
+    right: ImageRef | None = None
+
+
+@dataclass
 class DiffResult:
     """Complete diff of two documents.
 
@@ -74,6 +105,9 @@ class DiffResult:
     deletions_count: int = 0
     pages_touched_a: set[int] = field(default_factory=set)
     pages_touched_b: set[int] = field(default_factory=set)
+    # PR 17b: image-level differences
+    image_diffs: list[ImageDiff] = field(default_factory=list)
+    image_changes_count: int = 0
 
 
 class DiffService:
@@ -140,6 +174,9 @@ class DiffService:
                 for w in region_words_b:
                     result.pages_touched_b.add(w.page_index)
 
+        # PR 17b: image-level diffing (position-based matching)
+        self._diff_images(adapter_a, adapter_b, result)
+
         logger.info(
             "Diff: %d word(s) added, %d word(s) deleted across %d/%d pages",
             result.additions_count,
@@ -147,4 +184,81 @@ class DiffService:
             len(result.pages_touched_a),
             len(result.pages_touched_b),
         )
+        if result.image_changes_count > 0:
+            logger.info(
+                "Diff: %d image change(s) detected",
+                result.image_changes_count,
+            )
         return result
+
+    def _diff_images(
+        self,
+        adapter_a: PyMuPDFAdapter,
+        adapter_b: PyMuPDFAdapter,
+        result: DiffResult,
+    ) -> None:
+        """PR 17b: position-based image diffing.
+
+        For each page, match A's images to B's images by bbox center
+        distance (tolerance 20 pt). Matched pairs with differing MD5
+        hashes are ``replaced``. Unmatched A images are ``removed``;
+        unmatched B images are ``added``. Cross-page matching is not
+        attempted -- an image moved from page 3 to page 5 will show as
+        removed on page 3 + added on page 5.
+
+        Populates ``result.image_diffs`` and ``result.image_changes_count``.
+        """
+        images_a = adapter_a.extract_images_with_bboxes()
+        images_b = adapter_b.extract_images_with_bboxes()
+
+        # Convert to ImageRef with hashes, grouped per page
+        refs_a: dict[int, list[ImageRef]] = {}
+        for pi, bbox, raw in images_a:
+            h = hashlib.md5(raw).hexdigest()
+            refs_a.setdefault(pi, []).append(ImageRef(page_index=pi, bbox=bbox, image_hash=h))
+        refs_b: dict[int, list[ImageRef]] = {}
+        for pi, bbox, raw in images_b:
+            h = hashlib.md5(raw).hexdigest()
+            refs_b.setdefault(pi, []).append(ImageRef(page_index=pi, bbox=bbox, image_hash=h))
+
+        # For each page in either doc, match by proximity
+        all_pages = sorted(set(refs_a.keys()) | set(refs_b.keys()))
+        tolerance = 20.0  # pt
+
+        for page_index in all_pages:
+            page_a = list(refs_a.get(page_index, []))
+            page_b = list(refs_b.get(page_index, []))
+
+            # Match greedily by closest center distance
+            used_b: set[int] = set()
+            for ref_a in page_a:
+                cx_a = (ref_a.bbox[0] + ref_a.bbox[2]) / 2
+                cy_a = (ref_a.bbox[1] + ref_a.bbox[3]) / 2
+                best_idx = -1
+                best_dist = float("inf")
+                for i, ref_b in enumerate(page_b):
+                    if i in used_b:
+                        continue
+                    cx_b = (ref_b.bbox[0] + ref_b.bbox[2]) / 2
+                    cy_b = (ref_b.bbox[1] + ref_b.bbox[3]) / 2
+                    dist = ((cx_a - cx_b) ** 2 + (cy_a - cy_b) ** 2) ** 0.5
+                    if dist < best_dist and dist <= tolerance:
+                        best_dist = dist
+                        best_idx = i
+                if best_idx >= 0:
+                    ref_b = page_b[best_idx]
+                    used_b.add(best_idx)
+                    if ref_a.image_hash != ref_b.image_hash:
+                        result.image_diffs.append(
+                            ImageDiff(kind="replaced", left=ref_a, right=ref_b)
+                        )
+                        result.image_changes_count += 1
+                else:
+                    result.image_diffs.append(ImageDiff(kind="removed", left=ref_a, right=None))
+                    result.image_changes_count += 1
+
+            # Any unmatched B images on this page = added
+            for i, ref_b in enumerate(page_b):
+                if i not in used_b:
+                    result.image_diffs.append(ImageDiff(kind="added", left=None, right=ref_b))
+                    result.image_changes_count += 1

@@ -59,6 +59,8 @@ class DiffPane(QScrollArea):
         #   on top with a stronger color + outline).
         self._highlights_per_page: dict[int, list[tuple[float, float, float, float]]] = {}
         self._current_bboxes_per_page: dict[int, list[tuple[float, float, float, float]]] = {}
+        # PR 17b: image-change highlights (magenta), same-pane semantics as base.
+        self._image_bboxes_per_page: dict[int, list[tuple[float, float, float, float]]] = {}
         # Base (un-highlighted) pixmaps kept for cheap re-highlight
         self._base_pixmaps: list[QPixmap] = []
         self._page_labels: list[QLabel] = []
@@ -119,6 +121,19 @@ class DiffPane(QScrollArea):
         self._current_bboxes_per_page = dict(bboxes_per_page)
         self._repaint_all()
 
+    def set_image_highlights(
+        self,
+        bboxes_per_page: dict[int, list[tuple[float, float, float, float]]],
+    ) -> None:
+        """PR 17b: set IMAGE-change highlight bboxes and repaint.
+
+        Drawn in a distinct magenta color to differentiate from text
+        deletions (red) and insertions (green). Coexists with base
+        text highlights and current-diff outline.
+        """
+        self._image_bboxes_per_page = dict(bboxes_per_page)
+        self._repaint_all()
+
     @staticmethod
     def _merge_line_bboxes(
         bboxes: list[tuple[float, float, float, float]],
@@ -173,7 +188,8 @@ class DiffPane(QScrollArea):
                 continue
             base_bboxes = self._highlights_per_page.get(page_index, [])
             current_bboxes = self._current_bboxes_per_page.get(page_index, [])
-            if not base_bboxes and not current_bboxes:
+            image_bboxes = self._image_bboxes_per_page.get(page_index, [])
+            if not base_bboxes and not current_bboxes and not image_bboxes:
                 self._page_labels[page_index].setPixmap(base_pix)
                 continue
             decorated = QPixmap(base_pix)
@@ -190,6 +206,23 @@ class DiffPane(QScrollArea):
                         int((x1 - x0) * self._zoom),
                         int((y1 - y0) * self._zoom),
                     )
+            # PR 17b: Image-change layer -- magenta outline, no fill.
+            # Distinct from text deletion (red) / insertion (green) so
+            # users see at a glance that this is an image change.
+            if image_bboxes:
+                magenta = QColor(200, 20, 200, 255)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                pen = QPen(magenta)
+                pen.setWidth(5)
+                painter.setPen(pen)
+                for x0, y0, x1, y1 in image_bboxes:
+                    painter.drawRect(
+                        int(x0 * self._zoom),
+                        int(y0 * self._zoom),
+                        int((x1 - x0) * self._zoom),
+                        int((y1 - y0) * self._zoom),
+                    )
+
             # Current-diff layer -- thick bold-blue outline, no extra fill.
             # Merge adjacent same-line bboxes so a phrase gets ONE outline
             # box, not one per word. Wrapping across lines still yields

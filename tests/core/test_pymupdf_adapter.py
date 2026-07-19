@@ -2347,3 +2347,84 @@ class TestExtractWordsWithBoxes:
             x0, y0, x1, y1 = bbox
             assert x0 < x1
             assert y0 < y1
+
+
+# ---- PR 17b: extract_images_with_bboxes ---------------------------
+
+
+class TestExtractImagesWithBboxes:
+    def _solid_png(self, r: int, g: int, b: int, size: int = 8) -> bytes:
+        import pymupdf
+
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.Rect(0, 0, size, size), False)
+        pix.set_rect(pix.irect, (r, g, b))
+        return pix.tobytes("png")
+
+    def _make_doc_with_images(
+        self,
+        tmp_path: Path,
+        images_per_page: list[list[tuple[bytes, tuple[float, float, float, float]]]],
+    ) -> Path:
+        import pymupdf
+
+        path = tmp_path / "images.pdf"
+        d = pymupdf.open()
+        for page_imgs in images_per_page:
+            page = d.new_page(width=612, height=792)
+            for img_bytes, bbox in page_imgs:
+                page.insert_image(pymupdf.Rect(*bbox), stream=img_bytes)
+        d.save(str(path))
+        d.close()
+        return path
+
+    def test_extracts_single_image(self, tmp_path: Path) -> None:
+        red = self._solid_png(255, 0, 0)
+        path = self._make_doc_with_images(tmp_path, [[(red, (72, 100, 200, 200))]])
+        adapter = PyMuPDFAdapter()
+        adapter.open(path)
+        try:
+            images = adapter.extract_images_with_bboxes()
+        finally:
+            adapter.close()
+        assert len(images) == 1
+        pi, bbox, raw = images[0]
+        assert pi == 0
+        assert bbox == (72.0, 100.0, 200.0, 200.0)
+        assert len(raw) > 0
+
+    def test_multi_page_page_indices(self, tmp_path: Path) -> None:
+        red = self._solid_png(255, 0, 0)
+        blue = self._solid_png(0, 0, 255)
+        path = self._make_doc_with_images(
+            tmp_path,
+            [
+                [(red, (72, 100, 200, 200))],
+                [(blue, (100, 150, 250, 250))],
+            ],
+        )
+        adapter = PyMuPDFAdapter()
+        adapter.open(path)
+        try:
+            images = adapter.extract_images_with_bboxes()
+        finally:
+            adapter.close()
+        assert len(images) == 2
+        pages = sorted(pi for pi, _, _ in images)
+        assert pages == [0, 1]
+
+    def test_no_images_returns_empty(self, tmp_path: Path) -> None:
+        import pymupdf
+
+        path = tmp_path / "no_images.pdf"
+        d = pymupdf.open()
+        p = d.new_page(width=612, height=792)
+        p.insert_text((72, 100), "Just text", fontsize=14)
+        d.save(str(path))
+        d.close()
+        adapter = PyMuPDFAdapter()
+        adapter.open(path)
+        try:
+            images = adapter.extract_images_with_bboxes()
+        finally:
+            adapter.close()
+        assert images == []
